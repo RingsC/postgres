@@ -3,7 +3,7 @@
  * partition.c
  *		  Partitioning related data structures and functions.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,19 +14,17 @@
 */
 #include "postgres.h"
 
+#include "access/attmap.h"
 #include "access/genam.h"
-#include "access/heapam.h"
 #include "access/htup_details.h"
-#include "access/tupconvert.h"
 #include "access/sysattr.h"
+#include "access/table.h"
 #include "catalog/indexing.h"
 #include "catalog/partition.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_partitioned_table.h"
 #include "nodes/makefuncs.h"
-#include "optimizer/clauses.h"
-#include "optimizer/prep.h"
-#include "optimizer/var.h"
+#include "optimizer/optimizer.h"
 #include "partitioning/partbounds.h"
 #include "rewrite/rewriteManip.h"
 #include "utils/fmgroids.h"
@@ -34,10 +32,9 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-
 static Oid	get_partition_parent_worker(Relation inhRel, Oid relid);
 static void get_partition_ancestors_worker(Relation inhRel, Oid relid,
-							   List **ancestors);
+										   List **ancestors);
 
 /*
  * get_partition_parent
@@ -55,14 +52,14 @@ get_partition_parent(Oid relid)
 	Relation	catalogRelation;
 	Oid			result;
 
-	catalogRelation = heap_open(InheritsRelationId, AccessShareLock);
+	catalogRelation = table_open(InheritsRelationId, AccessShareLock);
 
 	result = get_partition_parent_worker(catalogRelation, relid);
 
 	if (!OidIsValid(result))
 		elog(ERROR, "could not find tuple for parent of relation %u", relid);
 
-	heap_close(catalogRelation, AccessShareLock);
+	table_close(catalogRelation, AccessShareLock);
 
 	return result;
 }
@@ -120,11 +117,11 @@ get_partition_ancestors(Oid relid)
 	List	   *result = NIL;
 	Relation	inhRel;
 
-	inhRel = heap_open(InheritsRelationId, AccessShareLock);
+	inhRel = table_open(InheritsRelationId, AccessShareLock);
 
 	get_partition_ancestors_worker(inhRel, relid, &result);
 
-	heap_close(inhRel, AccessShareLock);
+	table_close(inhRel, AccessShareLock);
 
 	return result;
 }
@@ -148,17 +145,50 @@ get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors)
 }
 
 /*
- * map_partition_varattnos - maps varattno of any Vars in expr from the
- * attno's of 'from_rel' to the attno's of 'to_rel' partition, each of which
- * may be either a leaf partition or a partitioned table, but both of which
- * must be from the same partitioning hierarchy.
+ * index_get_partition
+ *		Return the OID of index of the given partition that is a child
+ *		of the given index, or InvalidOid if there isn't one.
+ */
+Oid
+index_get_partition(Relation partition, Oid indexId)
+{
+	List	   *idxlist = RelationGetIndexList(partition);
+	ListCell   *l;
+
+	foreach(l, idxlist)
+	{
+		Oid			partIdx = lfirst_oid(l);
+		HeapTuple	tup;
+		Form_pg_class classForm;
+		bool		ispartition;
+
+		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(partIdx));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for relation %u", partIdx);
+		classForm = (Form_pg_class) GETSTRUCT(tup);
+		ispartition = classForm->relispartition;
+		ReleaseSysCache(tup);
+		if (!ispartition)
+			continue;
+		if (get_partition_parent(lfirst_oid(l)) == indexId)
+		{
+			list_free(idxlist);
+			return partIdx;
+		}
+	}
+
+	return InvalidOid;
+}
+
+/*
+ * map_partition_varattnos - maps varattnos of all Vars in 'expr' (that have
+ * varno 'fromrel_varno') from the attnums of 'from_rel' to the attnums of
+ * 'to_rel', each of which may be either a leaf partition or a partitioned
+ * table, but both of which must be from the same partitioning hierarchy.
  *
- * Even though all of the same column names must be present in all relations
- * in the hierarchy, and they must also have the same types, the attnos may
- * be different.
- *
- * If found_whole_row is not NULL, *found_whole_row returns whether a
- * whole-row variable was found in the input expression.
+ * We need this because even though all of the same column names must be
+ * present in all relations in the hierarchy, and they must also have the
+ * same types, the attnums may be different.
  *
  * Note: this will work on any node tree, so really the argument and result
  * should be declared "Node *".  But a substantial majority of the callers
@@ -166,28 +196,22 @@ get_partition_ancestors_worker(Relation inhRel, Oid relid, List **ancestors)
  */
 List *
 map_partition_varattnos(List *expr, int fromrel_varno,
-						Relation to_rel, Relation from_rel,
-						bool *found_whole_row)
+						Relation to_rel, Relation from_rel)
 {
-	bool		my_found_whole_row = false;
-
 	if (expr != NIL)
 	{
-		AttrNumber *part_attnos;
+		AttrMap    *part_attmap;
+		bool		found_whole_row;
 
-		part_attnos = convert_tuples_by_name_map(RelationGetDescr(to_rel),
-												 RelationGetDescr(from_rel),
-												 gettext_noop("could not convert row type"));
+		part_attmap = build_attrmap_by_name(RelationGetDescr(to_rel),
+											RelationGetDescr(from_rel));
 		expr = (List *) map_variable_attnos((Node *) expr,
 											fromrel_varno, 0,
-											part_attnos,
-											RelationGetDescr(from_rel)->natts,
+											part_attmap,
 											RelationGetForm(to_rel)->reltype,
-											&my_found_whole_row);
+											&found_whole_row);
+		/* Since we provided a to_rowtype, we may ignore found_whole_row. */
 	}
-
-	if (found_whole_row)
-		*found_whole_row = my_found_whole_row;
 
 	return expr;
 }
@@ -205,7 +229,7 @@ map_partition_varattnos(List *expr, int fromrel_varno,
 bool
 has_partition_attrs(Relation rel, Bitmapset *attnums, bool *used_in_expr)
 {
-	PartitionKey	key;
+	PartitionKey key;
 	int			partnatts;
 	List	   *partexprs;
 	ListCell   *partexprs_item;
@@ -241,7 +265,7 @@ has_partition_attrs(Relation rel, Bitmapset *attnums, bool *used_in_expr)
 
 			/* Find all attributes referenced */
 			pull_varattnos(expr, 1, &expr_attrs);
-			partexprs_item = lnext(partexprs_item);
+			partexprs_item = lnext(partexprs, partexprs_item);
 
 			if (bms_overlap(attnums, expr_attrs))
 			{
@@ -253,22 +277,6 @@ has_partition_attrs(Relation rel, Bitmapset *attnums, bool *used_in_expr)
 	}
 
 	return false;
-}
-
-/*
- * get_default_oid_from_partdesc
- *
- * Given a partition descriptor, return the OID of the default partition, if
- * one exists; else, return InvalidOid.
- */
-Oid
-get_default_oid_from_partdesc(PartitionDesc partdesc)
-{
-	if (partdesc && partdesc->boundinfo &&
-		partition_bound_has_default(partdesc->boundinfo))
-		return partdesc->oids[partdesc->boundinfo->default_index];
-
-	return InvalidOid;
 }
 
 /*
@@ -301,7 +309,7 @@ get_default_partition_oid(Oid parentId)
 /*
  * update_default_partition_oid
  *
- * Update pg_partition_table.partdefid with a new default partition OID.
+ * Update pg_partitioned_table.partdefid with a new default partition OID.
  */
 void
 update_default_partition_oid(Oid parentId, Oid defaultPartId)
@@ -310,7 +318,7 @@ update_default_partition_oid(Oid parentId, Oid defaultPartId)
 	Relation	pg_partitioned_table;
 	Form_pg_partitioned_table part_table_form;
 
-	pg_partitioned_table = heap_open(PartitionedRelationId, RowExclusiveLock);
+	pg_partitioned_table = table_open(PartitionedRelationId, RowExclusiveLock);
 
 	tuple = SearchSysCacheCopy1(PARTRELID, ObjectIdGetDatum(parentId));
 
@@ -323,7 +331,7 @@ update_default_partition_oid(Oid parentId, Oid defaultPartId)
 	CatalogTupleUpdate(pg_partitioned_table, &tuple->t_self, tuple);
 
 	heap_freetuple(tuple);
-	heap_close(pg_partitioned_table, RowExclusiveLock);
+	table_close(pg_partitioned_table, RowExclusiveLock);
 }
 
 /*

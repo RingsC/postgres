@@ -33,7 +33,7 @@ CREATE [ CONSTRAINT ] TRIGGER <replaceable class="parameter">name</replaceable> 
     [ REFERENCING { { OLD | NEW } TABLE [ AS ] <replaceable class="parameter">transition_relation_name</replaceable> } [ ... ] ]
     [ FOR [ EACH ] { ROW | STATEMENT } ]
     [ WHEN ( <replaceable class="parameter">condition</replaceable> ) ]
-    EXECUTE PROCEDURE <replaceable class="parameter">function_name</replaceable> ( <replaceable class="parameter">arguments</replaceable> )
+    EXECUTE { FUNCTION | PROCEDURE } <replaceable class="parameter">function_name</replaceable> ( <replaceable class="parameter">arguments</replaceable> )
 
 <phrase>where <replaceable class="parameter">event</replaceable> can be one of:</phrase>
 
@@ -261,7 +261,9 @@ CREATE [ CONSTRAINT ] TRIGGER <replaceable class="parameter">name</replaceable> 
 UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</replaceable> ... ]
 </synopsis>
       The trigger will only fire if at least one of the listed columns
-      is mentioned as a target of the <command>UPDATE</command> command.
+      is mentioned as a target of the <command>UPDATE</command> command
+      or if one of the listed columns is a generated column that depends on a
+      column that is the target of the <command>UPDATE</command>.
      </para>
 
      <para>
@@ -348,7 +350,7 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
 
     <listitem>
      <para>
-      This specifies whether the trigger procedure should be fired
+      This specifies whether the trigger function should be fired
       once for every row affected by the trigger event, or just once
       per SQL statement. If neither is specified, <literal>FOR EACH
       STATEMENT</literal> is the default.  Constraint triggers can only
@@ -401,6 +403,14 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
       and returning type <literal>trigger</literal>, which is executed when
       the trigger fires.
      </para>
+
+     <para>
+      In the syntax of <literal>CREATE TRIGGER</literal>, the keywords
+      <literal>FUNCTION</literal> and <literal>PROCEDURE</literal> are
+      equivalent, but the referenced function must in any case be a function,
+      not a procedure.  The use of the keyword <literal>PROCEDURE</literal>
+      here is historical and deprecated.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -448,6 +458,12 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
   </para>
 
   <para>
+   There are a few built-in trigger functions that can be used to
+   solve common problems without having to write your own trigger code;
+   see <xref linkend="functions-trigger"/>.
+  </para>
+
+  <para>
    In a <literal>BEFORE</literal> trigger, the <literal>WHEN</literal> condition is
    evaluated just before the function is or would be executed, so using
    <literal>WHEN</literal> is not materially different from testing the same
@@ -455,7 +471,7 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
    that the <literal>NEW</literal> row seen by the condition is the current value,
    as possibly modified by earlier triggers.  Also, a <literal>BEFORE</literal>
    trigger's <literal>WHEN</literal> condition is not allowed to examine the
-   system columns of the <literal>NEW</literal> row (such as <literal>oid</literal>),
+   system columns of the <literal>NEW</literal> row (such as <literal>ctid</literal>),
    because those won't have been set yet.
   </para>
 
@@ -516,7 +532,8 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
    Creating a row-level trigger on a partitioned table will cause identical
    triggers to be created in all its existing partitions; and any partitions
    created or attached later will contain an identical trigger, too.
-   Triggers on partitioned tables may only be <literal>AFTER</literal>.
+   If the partition is detached from its parent, the trigger is removed.
+   Triggers on partitioned tables may not be <literal>INSTEAD OF</literal>.
   </para>
 
   <para>
@@ -533,15 +550,6 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
    row-level triggers with transition relations cannot be defined on
    partitions or inheritance child tables.
   </para>
-
-  <para>
-   In <productname>PostgreSQL</productname> versions before 7.3, it was
-   necessary to declare trigger functions as returning the placeholder
-   type <type>opaque</type>, rather than <type>trigger</type>.  To support loading
-   of old dump files, <command>CREATE TRIGGER</command> will accept a function
-   declared as returning <type>opaque</type>, but it will issue a notice and
-   change the function's declared return type to <type>trigger</type>.
-  </para>
  </refsect1>
 
  <refsect1 id="sql-createtrigger-examples">
@@ -555,7 +563,7 @@ UPDATE OF <replaceable>column_name1</replaceable> [, <replaceable>column_name2</
 CREATE TRIGGER check_update
     BEFORE UPDATE ON accounts
     FOR EACH ROW
-    EXECUTE PROCEDURE check_account_update();
+    EXECUTE FUNCTION check_account_update();
 </programlisting>
 
    The same, but only execute the function if column <literal>balance</literal>
@@ -565,7 +573,7 @@ CREATE TRIGGER check_update
 CREATE TRIGGER check_update
     BEFORE UPDATE OF balance ON accounts
     FOR EACH ROW
-    EXECUTE PROCEDURE check_account_update();
+    EXECUTE FUNCTION check_account_update();
 </programlisting>
 
    This form only executes the function if column <literal>balance</literal>
@@ -576,7 +584,7 @@ CREATE TRIGGER check_update
     BEFORE UPDATE ON accounts
     FOR EACH ROW
     WHEN (OLD.balance IS DISTINCT FROM NEW.balance)
-    EXECUTE PROCEDURE check_account_update();
+    EXECUTE FUNCTION check_account_update();
 </programlisting>
 
    Call a function to log updates of <literal>accounts</literal>, but only if
@@ -587,7 +595,7 @@ CREATE TRIGGER log_update
     AFTER UPDATE ON accounts
     FOR EACH ROW
     WHEN (OLD.* IS DISTINCT FROM NEW.*)
-    EXECUTE PROCEDURE log_account_update();
+    EXECUTE FUNCTION log_account_update();
 </programlisting>
 
    Execute the function <function>view_insert_row</function> for each row to insert
@@ -597,7 +605,7 @@ CREATE TRIGGER log_update
 CREATE TRIGGER view_insert
     INSTEAD OF INSERT ON my_view
     FOR EACH ROW
-    EXECUTE PROCEDURE view_insert_row();
+    EXECUTE FUNCTION view_insert_row();
 </programlisting>
 
    Execute the function <function>check_transfer_balances_to_zero</function> for each
@@ -609,7 +617,7 @@ CREATE TRIGGER transfer_insert
     AFTER INSERT ON transfer
     REFERENCING NEW TABLE AS inserted
     FOR EACH STATEMENT
-    EXECUTE PROCEDURE check_transfer_balances_to_zero();
+    EXECUTE FUNCTION check_transfer_balances_to_zero();
 </programlisting>
 
    Execute the function <function>check_matching_pairs</function> for each row to
@@ -621,7 +629,7 @@ CREATE TRIGGER paired_items_update
     AFTER UPDATE ON paired_items
     REFERENCING NEW TABLE AS newtab OLD TABLE AS oldtab
     FOR EACH ROW
-    EXECUTE PROCEDURE check_matching_pairs();
+    EXECUTE FUNCTION check_matching_pairs();
 </programlisting>
   </para>
 

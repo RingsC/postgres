@@ -4,7 +4,7 @@
  *
  *	  Routines for operator manipulation commands
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -21,21 +21,18 @@
  * NOTES
  *	  These things must be defined and committed in the following order:
  *		"create function":
- *				input/output, recv/send procedures
+ *				input/output, recv/send functions
  *		"create type":
  *				type
  *		"create operator":
  *				operators
  *
- *		Most of the parse-tree manipulation routines are defined in
- *		commands/manip.c.
- *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
@@ -47,6 +44,7 @@
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
 #include "parser/parse_type.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -79,8 +77,8 @@ DefineOperator(List *names, List *parameters)
 	Oid			rettype;
 	List	   *commutatorName = NIL;	/* optional commutator operator name */
 	List	   *negatorName = NIL;	/* optional negator operator name */
-	List	   *restrictionName = NIL;	/* optional restrict. sel. procedure */
-	List	   *joinName = NIL; /* optional join sel. procedure */
+	List	   *restrictionName = NIL;	/* optional restrict. sel. function */
+	List	   *joinName = NIL; /* optional join sel. function */
 	Oid			functionOid;	/* functions converted to OID */
 	Oid			restrictionOid;
 	Oid			joinOid;
@@ -120,6 +118,9 @@ DefineOperator(List *names, List *parameters)
 						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
 						 errmsg("SETOF type not allowed for operator argument")));
 		}
+		/* "function" and "procedure" are equivalent here */
+		else if (strcmp(defel->defname, "function") == 0)
+			functionName = defGetQualifiedName(defel);
 		else if (strcmp(defel->defname, "procedure") == 0)
 			functionName = defGetQualifiedName(defel);
 		else if (strcmp(defel->defname, "commutator") == 0)
@@ -159,7 +160,7 @@ DefineOperator(List *names, List *parameters)
 	if (functionName == NIL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-				 errmsg("operator procedure must be specified")));
+				 errmsg("operator function must be specified")));
 
 	/* Transform type names to type OIDs */
 	if (typeName1)
@@ -245,8 +246,8 @@ DefineOperator(List *names, List *parameters)
 					   functionOid, /* function for operator */
 					   commutatorName,	/* optional commutator operator name */
 					   negatorName, /* optional negator operator name */
-					   restrictionOid,	/* optional restrict. sel. procedure */
-					   joinOid, /* optional join sel. procedure name */
+					   restrictionOid,	/* optional restrict. sel. function */
+					   joinOid, /* optional join sel. function name */
 					   canMerge,	/* operator merges */
 					   canHash);	/* operator hashes */
 }
@@ -342,7 +343,7 @@ RemoveOperatorById(Oid operOid)
 	HeapTuple	tup;
 	Form_pg_operator op;
 
-	relation = heap_open(OperatorRelationId, RowExclusiveLock);
+	relation = table_open(OperatorRelationId, RowExclusiveLock);
 
 	tup = SearchSysCache1(OPEROID, ObjectIdGetDatum(operOid));
 	if (!HeapTupleIsValid(tup)) /* should not happen */
@@ -371,7 +372,7 @@ RemoveOperatorById(Oid operOid)
 
 	ReleaseSysCache(tup);
 
-	heap_close(relation, RowExclusiveLock);
+	table_close(relation, RowExclusiveLock);
 }
 
 /*
@@ -393,18 +394,18 @@ AlterOperator(AlterOperatorStmt *stmt)
 	Datum		values[Natts_pg_operator];
 	bool		nulls[Natts_pg_operator];
 	bool		replaces[Natts_pg_operator];
-	List	   *restrictionName = NIL;	/* optional restrict. sel. procedure */
+	List	   *restrictionName = NIL;	/* optional restrict. sel. function */
 	bool		updateRestriction = false;
 	Oid			restrictionOid;
-	List	   *joinName = NIL; /* optional join sel. procedure */
+	List	   *joinName = NIL; /* optional join sel. function */
 	bool		updateJoin = false;
 	Oid			joinOid;
 
 	/* Look up the operator */
 	oprId = LookupOperWithArgs(stmt->opername, false);
-	catalog = heap_open(OperatorRelationId, RowExclusiveLock);
+	catalog = table_open(OperatorRelationId, RowExclusiveLock);
 	tup = SearchSysCacheCopy1(OPEROID, ObjectIdGetDatum(oprId));
-	if (tup == NULL)
+	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "cache lookup failed for operator %u", oprId);
 	oprForm = (Form_pg_operator) GETSTRUCT(tup);
 
@@ -436,6 +437,7 @@ AlterOperator(AlterOperatorStmt *stmt)
 		 */
 		else if (strcmp(defel->defname, "leftarg") == 0 ||
 				 strcmp(defel->defname, "rightarg") == 0 ||
+				 strcmp(defel->defname, "function") == 0 ||
 				 strcmp(defel->defname, "procedure") == 0 ||
 				 strcmp(defel->defname, "commutator") == 0 ||
 				 strcmp(defel->defname, "negator") == 0 ||
@@ -520,7 +522,7 @@ AlterOperator(AlterOperatorStmt *stmt)
 
 	InvokeObjectPostAlterHook(OperatorRelationId, oprId, 0);
 
-	heap_close(catalog, NoLock);
+	table_close(catalog, NoLock);
 
 	return address;
 }

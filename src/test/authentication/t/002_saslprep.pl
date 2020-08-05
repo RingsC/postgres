@@ -1,16 +1,16 @@
 # Test password normalization in SCRAM.
 #
-# This test cannot run on Windows as Postgres cannot be set up with Unix
-# sockets and needs to go through SSPI.
+# This test can only run with Unix-domain sockets.
 
 use strict;
 use warnings;
 use PostgresNode;
 use TestLib;
 use Test::More;
-if ($windows_os)
+if (!$use_unix_sockets)
 {
-	plan skip_all => "authentication tests cannot run on Windows";
+	plan skip_all =>
+	  "authentication tests cannot run without Unix-domain sockets";
 }
 else
 {
@@ -27,6 +27,7 @@ sub reset_pg_hba
 	unlink($node->data_dir . '/pg_hba.conf');
 	$node->append_conf('pg_hba.conf', "local all all $hba_method");
 	$node->reload;
+	return;
 }
 
 # Test access for a single role, useful to wrap all tests into one.
@@ -45,11 +46,12 @@ sub test_login
 	is($res, $expected_res,
 		"authentication $status_string for role $role with password $password"
 	);
+	return;
 }
 
-# Initialize master node. Force UTF-8 encoding, so that we can use non-ASCII
+# Initialize primary node. Force UTF-8 encoding, so that we can use non-ASCII
 # characters in the passwords below.
-my $node = get_new_node('master');
+my $node = get_new_node('primary');
 $node->init(extra => [ '--locale=C', '--encoding=UTF8' ]);
 $node->start;
 

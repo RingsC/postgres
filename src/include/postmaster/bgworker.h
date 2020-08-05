@@ -31,7 +31,7 @@
  * different) code.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -115,11 +115,11 @@ extern void RegisterBackgroundWorker(BackgroundWorker *worker);
 
 /* Register a new bgworker from a regular backend */
 extern bool RegisterDynamicBackgroundWorker(BackgroundWorker *worker,
-								BackgroundWorkerHandle **handle);
+											BackgroundWorkerHandle **handle);
 
 /* Query the status of a bgworker */
 extern BgwHandleStatus GetBackgroundWorkerPid(BackgroundWorkerHandle *handle,
-					   pid_t *pidp);
+											  pid_t *pidp);
 extern BgwHandleStatus WaitForBackgroundWorkerStartup(BackgroundWorkerHandle *handle, pid_t *pid);
 extern BgwHandleStatus
 			WaitForBackgroundWorkerShutdown(BackgroundWorkerHandle *);
@@ -145,8 +145,14 @@ extern void BackgroundWorkerInitializeConnection(const char *dbname, const char 
 /* Just like the above, but specifying database and user by OID. */
 extern void BackgroundWorkerInitializeConnectionByOid(Oid dboid, Oid useroid, uint32 flags);
 
-/* Flags to BackgroundWorkerInitializeConnection et al */
+/*
+ * Flags to BackgroundWorkerInitializeConnection et al
+ *
+ *
+ * Allow bypassing datallowconn restrictions when connecting to database
+ */
 #define BGWORKER_BYPASS_ALLOWCONN 1
+
 
 /* Block/unblock signals in a background worker process */
 extern void BackgroundWorkerBlockSignals(void);

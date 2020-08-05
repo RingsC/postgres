@@ -1,7 +1,7 @@
 <!-- doc/src/sgml/plpython.sgml -->
 
 <chapter id="plpython">
- <title>PL/Python - Python Procedural Language</title>
+ <title>PL/Python &mdash; Python Procedural Language</title>
 
  <indexterm zone="plpython"><primary>PL/Python</primary></indexterm>
  <indexterm zone="plpython"><primary>Python</primary></indexterm>
@@ -9,7 +9,7 @@
  <para>
   The <application>PL/Python</application> procedural language allows
   <productname>PostgreSQL</productname> functions to be written in the
-  <ulink url="http://www.python.org">Python language</ulink>.
+  <ulink url="https://www.python.org">Python language</ulink>.
  </para>
 
  <para>
@@ -89,7 +89,7 @@
    </itemizedlist>
 
    This scheme is analogous to the recommendations in <ulink
-   url="http://www.python.org/dev/peps/pep-0394/">PEP 394</ulink> regarding the
+   url="https://www.python.org/dev/peps/pep-0394/">PEP 394</ulink> regarding the
    naming and transitioning of the <command>python</command> command.
   </para>
 
@@ -153,7 +153,7 @@
      <para>
       Daredevils, who want to build a Python-3-only operating system
       environment, can change the contents of
-      <link linkend="catalog-pg-pltemplate"><structname>pg_pltemplate</structname></link>
+      <literal>plpythonu</literal>'s extension control and script files
       to make <literal>plpythonu</literal> be equivalent
       to <literal>plpython3u</literal>, keeping in mind that this
       would make their installation incompatible with most of the rest
@@ -165,7 +165,7 @@
 
   <para>
    See also the
-   document <ulink url="http://docs.python.org/py3k/whatsnew/3.0.html">What's
+   document <ulink url="https://docs.python.org/3/whatsnew/3.0.html">What's
    New In Python 3.0</ulink> for more information about porting to
    Python 3.
   </para>
@@ -665,7 +665,7 @@ CALL python_triple(5, 10);
   </sect2>
 
   <sect2>
-   <title>Set-returning Functions</title>
+   <title>Set-Returning Functions</title>
   <para>
    A <application>PL/Python</application> function can also return sets of
    scalar or composite types. There are several ways to achieve this because
@@ -768,9 +768,9 @@ SELECT * FROM multiout_simple_setof(3);
   <title>Sharing Data</title>
   <para>
    The global dictionary <varname>SD</varname> is available to store
-   data between function calls.  This variable is private static data.
+   private data between repeated calls to the same function.
    The global dictionary <varname>GD</varname> is public data,
-   available to all Python functions within a session.  Use with
+   that is available to all Python functions within a session;  use with
    care.<indexterm><primary>global data</primary>
    <secondary>in PL/Python</secondary></indexterm>
   </para>
@@ -1116,7 +1116,7 @@ $$ LANGUAGE plpythonu;
       batch of rows, never larger than the parameter value.  Once all rows are
       exhausted, <literal>fetch</literal> starts returning an empty result
       object.  Cursor objects also provide an
-      <ulink url="http://docs.python.org/library/stdtypes.html#iterator-types">iterator
+      <ulink url="https://docs.python.org/library/stdtypes.html#iterator-types">iterator
       interface</ulink>, yielding one row at a time until all rows are
       exhausted.  Data fetched that way is not returned as result objects, but
       rather as dictionaries, each dictionary corresponding to a single result
@@ -1167,7 +1167,7 @@ $$ LANGUAGE plpythonu;
       <para>
         Do not confuse objects created by <literal>plpy.cursor</literal> with
         DB-API cursors as defined by
-        the <ulink url="http://www.python.org/dev/peps/pep-0249/">Python
+        the <ulink url="https://www.python.org/dev/peps/pep-0249/">Python
         Database API specification</ulink>.  They don't have anything in common
         except for the name.
       </para>
@@ -1227,7 +1227,7 @@ except spiexceptions.DivisionByZero:
     return "denominator cannot equal zero"
 except spiexceptions.UniqueViolation:
     return "already have that fraction"
-except plpy.SPIError, e:
+except plpy.SPIError as e:
     return "other error, SQLSTATE %s" % e.sqlstate
 else:
     return "fraction inserted"
@@ -1274,7 +1274,7 @@ CREATE FUNCTION transfer_funds() RETURNS void AS $$
 try:
     plpy.execute("UPDATE accounts SET balance = balance - 100 WHERE account_name = 'joe'")
     plpy.execute("UPDATE accounts SET balance = balance + 100 WHERE account_name = 'mary'")
-except plpy.SPIError, e:
+except plpy.SPIError as e:
     result = "error transferring funds: %s" % e.args
 else:
     result = "funds transferred correctly"
@@ -1297,7 +1297,7 @@ $$ LANGUAGE plpythonu;
     helper object to manage explicit subtransactions that gets created
     with the <literal>plpy.subtransaction()</literal> function.
     Objects created by this function implement the
-    <ulink url="http://docs.python.org/library/stdtypes.html#context-manager-types">
+    <ulink url="https://docs.python.org/library/stdtypes.html#context-manager-types">
     context manager interface</ulink>.  Using explicit subtransactions
     we can rewrite our function as:
 <programlisting>
@@ -1306,7 +1306,7 @@ try:
     with plpy.subtransaction():
         plpy.execute("UPDATE accounts SET balance = balance - 100 WHERE account_name = 'joe'")
         plpy.execute("UPDATE accounts SET balance = balance + 100 WHERE account_name = 'mary'")
-except plpy.SPIError, e:
+except plpy.SPIError as e:
     result = "error transferring funds: %s" % e.args
 else:
     result = "funds transferred correctly"
@@ -1335,9 +1335,8 @@ $$ LANGUAGE plpythonu;
 
    <para>
     Context managers syntax using the <literal>with</literal> keyword
-    is available by default in Python 2.6.  If using PL/Python with an
-    older Python version, it is still possible to use explicit
-    subtransactions, although not as transparently.  You can call the
+    is available by default in Python 2.6.  For compatibility with
+    older Python versions, you can call the
     subtransaction manager's <literal>__enter__</literal> and
     <literal>__exit__</literal> functions using the
     <literal>enter</literal> and <literal>exit</literal> convenience
@@ -1357,7 +1356,7 @@ try:
         raise
     else:
         subxact.exit(None, None, None)
-except plpy.SPIError, e:
+except plpy.SPIError as e:
     result = "error transferring funds: %s" % e.args
 else:
     result = "funds transferred correctly"
@@ -1367,17 +1366,6 @@ plpy.execute(plan, [result])
 $$ LANGUAGE plpythonu;
 </programlisting>
    </para>
-
-   <note>
-    <para>
-     Although context managers were implemented in Python 2.5, to use
-     the <literal>with</literal> syntax in that version you need to
-     use a <ulink
-     url="http://docs.python.org/release/2.5/ref/future.html">future
-     statement</ulink>.  Because of implementation details, however,
-     you cannot use future statements in PL/Python functions.
-    </para>
-   </note>
   </sect2>
  </sect1>
 

@@ -12,7 +12,7 @@
  *	  http://www.ietf.org/rfc/rfc4013.txt
  *
  *
- * Portions Copyright (c) 2017-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2017-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/common/saslprep.c
@@ -27,12 +27,6 @@
 
 #include "common/saslprep.h"
 #include "common/unicode_norm.h"
-
-/*
- * Note: The functions in this file depend on functions from
- * src/backend/utils/mb/wchar.c, so in order to use this in frontend
- * code, you will need to link that in, too.
- */
 #include "mb/pg_wchar.h"
 
 /*
@@ -1081,6 +1075,9 @@ pg_saslprep(const char *input, char **output)
 	unsigned char *p;
 	pg_wchar   *wp;
 
+	/* Ensure we return *output as NULL on failure */
+	*output = NULL;
+
 	/* Check that the password isn't stupendously long */
 	if (strlen(input) > MAX_PASSWORD_LENGTH)
 	{
@@ -1112,10 +1109,7 @@ pg_saslprep(const char *input, char **output)
 	 */
 	input_size = pg_utf8_string_len(input);
 	if (input_size < 0)
-	{
-		*output = NULL;
 		return SASLPREP_INVALID_UTF8;
-	}
 
 	input_chars = ALLOC((input_size + 1) * sizeof(pg_wchar));
 	if (!input_chars)
@@ -1162,7 +1156,7 @@ pg_saslprep(const char *input, char **output)
 	 * 2) Normalize -- Normalize the result of step 1 using Unicode
 	 * normalization.
 	 */
-	output_chars = unicode_normalize_kc(input_chars);
+	output_chars = unicode_normalize(UNICODE_NFKC, input_chars);
 	if (!output_chars)
 		goto oom;
 
@@ -1246,6 +1240,11 @@ pg_saslprep(const char *input, char **output)
 	result = ALLOC(result_size + 1);
 	if (!result)
 		goto oom;
+
+	/*
+	 * There are no error exits below here, so the error exit paths don't need
+	 * to worry about possibly freeing "result".
+	 */
 	p = (unsigned char *) result;
 	for (wp = output_chars; *wp; wp++)
 	{

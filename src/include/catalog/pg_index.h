@@ -4,7 +4,7 @@
  *	  definition of the "index" system catalog (pg_index)
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_index.h
@@ -26,7 +26,7 @@
  *		typedef struct FormData_pg_index.
  * ----------------
  */
-CATALOG(pg_index,2610,IndexRelationId) BKI_WITHOUT_OIDS BKI_SCHEMA_MACRO
+CATALOG(pg_index,2610,IndexRelationId) BKI_SCHEMA_MACRO
 {
 	Oid			indexrelid;		/* OID of the index */
 	Oid			indrelid;		/* OID of the relation it indexes */
@@ -44,12 +44,14 @@ CATALOG(pg_index,2610,IndexRelationId) BKI_WITHOUT_OIDS BKI_SCHEMA_MACRO
 	bool		indisreplident; /* is this index the identity for replication? */
 
 	/* variable-length fields start here, but we allow direct access to indkey */
-	int2vector	indkey;			/* column numbers of indexed cols, or 0 */
+	int2vector	indkey BKI_FORCE_NOT_NULL;	/* column numbers of indexed cols,
+											 * or 0 */
 
 #ifdef CATALOG_VARLEN
-	oidvector	indcollation;	/* collation identifiers */
-	oidvector	indclass;		/* opclass identifiers */
-	int2vector	indoption;		/* per-column flags (AM-specific meanings) */
+	oidvector	indcollation BKI_FORCE_NOT_NULL;	/* collation identifiers */
+	oidvector	indclass BKI_FORCE_NOT_NULL;	/* opclass identifiers */
+	int2vector	indoption BKI_FORCE_NOT_NULL;	/* per-column flags
+												 * (AM-specific meanings) */
 	pg_node_tree indexprs;		/* expression trees for index attributes that
 								 * are not simple column references; one for
 								 * each zero entry in indkey[] */
@@ -76,14 +78,5 @@ typedef FormData_pg_index *Form_pg_index;
 #define INDOPTION_NULLS_FIRST	0x0002	/* NULLs are first instead of last */
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
-
-/*
- * Use of these macros is recommended over direct examination of the state
- * flag columns where possible; this allows source code compatibility with
- * the hacky representation used in 9.2.
- */
-#define IndexIsValid(indexForm) ((indexForm)->indisvalid)
-#define IndexIsReady(indexForm) ((indexForm)->indisready)
-#define IndexIsLive(indexForm)	((indexForm)->indislive)
 
 #endif							/* PG_INDEX_H */

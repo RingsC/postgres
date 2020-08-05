@@ -22,9 +22,9 @@ PostgreSQL documentation
  <refsynopsisdiv>
 <synopsis>
 CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class="parameter">name</replaceable> ] ON [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ USING <replaceable class="parameter">method</replaceable> ]
-    ( { <replaceable class="parameter">column_name</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [ COLLATE <replaceable class="parameter">collation</replaceable> ] [ <replaceable class="parameter">opclass</replaceable> ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ] [, ...] )
+    ( { <replaceable class="parameter">column_name</replaceable> | ( <replaceable class="parameter">expression</replaceable> ) } [ COLLATE <replaceable class="parameter">collation</replaceable> ] [ <replaceable class="parameter">opclass</replaceable> [ ( <replaceable class="parameter">opclass_parameter</replaceable> = <replaceable class="parameter">value</replaceable> [, ... ] ) ] ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ] [, ...] )
     [ INCLUDE ( <replaceable class="parameter">column_name</replaceable> [, ...] ) ]
-    [ WITH ( <replaceable class="parameter">storage_parameter</replaceable> = <replaceable class="parameter">value</replaceable> [, ... ] ) ]
+    [ WITH ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
     [ TABLESPACE <replaceable class="parameter">tablespace_name</replaceable> ]
     [ WHERE <replaceable class="parameter">predicate</replaceable> ]
 </synopsis>
@@ -126,8 +126,12 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
         updates, or deletes on the table; whereas a standard index build
         locks out writes (but not reads) on the table until it's done.
         There are several caveats to be aware of when using this option
-        &mdash; see <xref linkend="sql-createindex-concurrently"
-        endterm="sql-createindex-concurrently-title"/>.
+        &mdash; see <xref linkend="sql-createindex-concurrently"/> below.
+       </para>
+       <para>
+        For temporary tables, <command>CREATE INDEX</command> is always
+        non-concurrent, as no other session can access them, and
+        non-concurrent index creation is cheaper.
        </para>
       </listitem>
      </varlistentry>
@@ -149,25 +153,30 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
       <listitem>
        <para>
         The optional <literal>INCLUDE</literal> clause specifies a
-        list of columns which will be included as a non-key part in the index.
-        Columns listed in this clause cannot also be present as index key columns.
-        The <literal>INCLUDE</literal> columns exist solely to
-        allow more queries to benefit from <firstterm>index-only scans</firstterm>
-        by including the values of the specified columns in the index.  These values
-        would otherwise have to be obtained by reading the table's heap.
+        list of columns which will be included in the index
+        as <firstterm>non-key</firstterm> columns.  A non-key column cannot
+        be used in an index scan search qualification, and it is disregarded
+        for purposes of any uniqueness or exclusion constraint enforced by
+        the index.  However, an index-only scan can return the contents of
+        non-key columns without having to visit the index's table, since
+        they are available directly from the index entry.  Thus, addition of
+        non-key columns allows index-only scans to be used for queries that
+        otherwise could not use them.
        </para>
 
        <para>
-        In <literal>UNIQUE</literal> indexes, uniqueness is only enforced
-        for key columns.  Columns listed in the <literal>INCLUDE</literal>
-        clause have no effect on uniqueness enforcement.  Other constraints
-        (<literal>PRIMARY KEY</literal> and <literal>EXCLUDE</literal>) work
-        the same way.
+        It's wise to be conservative about adding non-key columns to an
+        index, especially wide columns.  If an index tuple exceeds the
+        maximum size allowed for the index type, data insertion will fail.
+        In any case, non-key columns duplicate data from the index's table
+        and bloat the size of the index, thus potentially slowing searches.
+        Furthermore, B-tree deduplication is never used with indexes
+        that have a non-key column.
        </para>
 
        <para>
         Columns listed in the <literal>INCLUDE</literal> clause don't need
-        appropriate operator classes; the clause can contain non-key index
+        appropriate operator classes; the clause can include
         columns whose data types don't have operator classes defined for
         a given access method.
        </para>
@@ -178,18 +187,11 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
        </para>
 
        <para>
-        Currently, only the B-tree index access method supports this feature.
-        In B-tree indexes, the values of columns listed in the
-        <literal>INCLUDE</literal> clause are included in leaf tuples which
-        are linked to the heap tuples, but are not included into pivot tuples
-        used for tree navigation.  Therefore, moving columns from the list of
-        key columns to the <literal>INCLUDE</literal> clause can slightly
-        reduce index size and improve the tree branching factor.
-       </para>
-
-       <para>
-        Indexes with columns listed in the <literal>INCLUDE</literal> clause
-        are also called <quote>covering indexes</quote>.
+        Currently, the B-tree and the GiST index access methods support this
+        feature.  In B-tree and the GiST indexes, the values of columns listed
+        in the <literal>INCLUDE</literal> clause are included in leaf tuples
+        which correspond to heap tuples, but are not included in upper-level
+        index entries used for tree navigation.
        </para>
       </listitem>
      </varlistentry>
@@ -283,6 +285,15 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
      </varlistentry>
 
      <varlistentry>
+      <term><replaceable class="parameter">opclass_parameter</replaceable></term>
+      <listitem>
+       <para>
+        The name of an operator class parameter. See below for details.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><literal>ASC</literal></term>
       <listitem>
        <para>
@@ -325,7 +336,7 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
       <listitem>
        <para>
         The name of an index-method-specific storage parameter.  See
-        <xref linkend="sql-createindex-storage-parameters" endterm="sql-createindex-storage-parameters-title"/>
+        <xref linkend="sql-createindex-storage-parameters"/> below
         for details.
        </para>
       </listitem>
@@ -354,52 +365,23 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
 
     </variablelist>
 
-  <refsect2 id="sql-createindex-storage-parameters">
-   <title id="sql-createindex-storage-parameters-title">Index Storage Parameters</title>
+  <refsect2 id="sql-createindex-storage-parameters" xreflabel="Index Storage Parameters">
+   <title>Index Storage Parameters</title>
 
    <para>
     The optional <literal>WITH</literal> clause specifies <firstterm>storage
     parameters</firstterm> for the index.  Each index method has its own set of allowed
-    storage parameters.  All indexes accept the following parameter:
+    storage parameters.  The B-tree, hash, GiST and SP-GiST index methods all
+    accept this parameter:
    </para>
 
    <variablelist>
-   <varlistentry>
-    <term><literal>recheck_on_update</literal></term>
-    <listitem>
-     <para>
-       Specifies whether to recheck a functional index value to see whether
-       we can use a HOT update or not. The default value is on for functional
-       indexes with an total expression cost less than 1000, otherwise off.
-       You might decide to turn this off if you knew that a function used in
-       an index is unlikely to return the same value when one of the input
-       columns is updated and so the recheck is not worth the additional cost
-       of executing the function.
-     </para>
-       
-     <para>
-       Functional indexes are used frequently for the case where the function
-       returns a subset of the argument. Examples of this would be accessing
-       part of a string with <literal>SUBSTR()</literal> or accessing a single
-       field in a JSON document using an expression such as
-       <literal>(bookinfo-&gt;&gt;'isbn')</literal>. In this example, the JSON
-       document might be updated frequently, yet it is uncommon for the ISBN
-       field for a book to change so we would keep the parameter set to on
-       for that index. A more frequently changing field might have an index
-       with this parameter turned off, while very frequently changing fields
-       might be better to avoid indexing at all under high load.
-     </para>
-    </listitem>
-   </varlistentry>
-   </variablelist>
-
-   <para>
-     The B-tree, hash, GiST and SP-GiST index methods all accept this parameter:
-   </para>
-
-   <variablelist>
-   <varlistentry>
-    <term><literal>fillfactor</literal></term>
+   <varlistentry id="index-reloption-fillfactor" xreflabel="fillfactor">
+    <term><literal>fillfactor</literal> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>fillfactor</varname> storage parameter</primary>
+     </indexterm>
+    </term>
     <listitem>
      <para>
       The fillfactor for an index is a percentage that determines how full
@@ -421,12 +403,45 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </variablelist>
 
    <para>
-    B-tree indexes additionally accept this parameter:
+    B-tree indexes also accept these parameters:
    </para>
 
    <variablelist>
-   <varlistentry>
-    <term><literal>vacuum_cleanup_index_scale_factor</literal></term>
+   <varlistentry id="index-reloption-deduplicate-items" xreflabel="deduplicate_items">
+    <term><literal>deduplicate_items</literal> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>deduplicate_items</varname> storage parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+    <para>
+      Controls usage of the B-tree deduplication technique described
+      in <xref linkend="btree-deduplication"/>.  Set to
+      <literal>ON</literal> or <literal>OFF</literal> to enable or
+      disable the optimization.  (Alternative spellings of
+      <literal>ON</literal> and <literal>OFF</literal> are allowed as
+      described in <xref linkend="config-setting"/>.) The default is
+      <literal>ON</literal>.
+    </para>
+
+    <note>
+     <para>
+      Turning <literal>deduplicate_items</literal> off via
+      <command>ALTER INDEX</command> prevents future insertions from
+      triggering deduplication, but does not in itself make existing
+      posting list tuples use the standard tuple representation.
+     </para>
+    </note>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="index-reloption-vacuum-cleanup-index-scale-factor" xreflabel="vacuum_cleanup_index_scale_factor">
+    <term><literal>vacuum_cleanup_index_scale_factor</literal> (<type>floating point</type>)
+     <indexterm>
+      <primary><varname>vacuum_cleanup_index_scale_factor</varname></primary>
+      <secondary>storage parameter</secondary>
+     </indexterm>
+    </term>
     <listitem>
     <para>
       Per-index value for <xref linkend="guc-vacuum-cleanup-index-scale-factor"/>.
@@ -440,8 +455,12 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </para>
 
    <variablelist>
-   <varlistentry>
-    <term><literal>buffering</literal></term>
+   <varlistentry id="index-reloption-buffering" xreflabel="buffering">
+    <term><literal>buffering</literal> (<type>enum</type>)
+     <indexterm>
+      <primary><varname>buffering</varname> storage parameter</primary>
+     </indexterm>
+    </term>
     <listitem>
     <para>
      Determines whether the buffering build technique described in
@@ -459,16 +478,18 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </para>
 
    <variablelist>
-   <varlistentry>
-    <term><literal>fastupdate</literal></term>
+   <varlistentry id="index-reloption-fastupdate" xreflabel="fastupdate">
+    <term><literal>fastupdate</literal> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>fastupdate</varname> storage parameter</primary>
+     </indexterm>
+    </term>
     <listitem>
     <para>
      This setting controls usage of the fast update technique described in
      <xref linkend="gin-fast-update"/>.  It is a Boolean parameter:
      <literal>ON</literal> enables fast update, <literal>OFF</literal> disables it.
-     (Alternative spellings of <literal>ON</literal> and <literal>OFF</literal> are
-     allowed as described in <xref linkend="config-setting"/>.)  The
-     default is <literal>ON</literal>.
+     The default is <literal>ON</literal>.
     </para>
 
     <note>
@@ -483,9 +504,15 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
     </listitem>
    </varlistentry>
    </variablelist>
+
    <variablelist>
-   <varlistentry>
-    <term><literal>gin_pending_list_limit</literal></term>
+   <varlistentry id="index-reloption-gin-pending-list-limit" xreflabel="gin_pending_list_limit">
+    <term><literal>gin_pending_list_limit</literal> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>gin_pending_list_limit</varname></primary>
+      <secondary>storage parameter</secondary>
+     </indexterm>
+    </term>
     <listitem>
     <para>
      Custom <xref linkend="guc-gin-pending-list-limit"/> parameter.
@@ -500,8 +527,12 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </para>
 
    <variablelist>
-   <varlistentry>
-    <term><literal>pages_per_range</literal></term>
+   <varlistentry id="index-reloption-pages-per-range" xreflabel="pages_per_range">
+    <term><literal>pages_per_range</literal> (<type>integer</type>)
+     <indexterm>
+      <primary><varname>pages_per_range</varname> storage parameter</primary>
+     </indexterm>
+    </term>
     <listitem>
     <para>
      Defines the number of table blocks that make up one block range for
@@ -511,8 +542,12 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
     </listitem>
    </varlistentry>
 
-   <varlistentry>
-    <term><literal>autosummarize</literal></term>
+   <varlistentry id="index-reloption-autosummarize" xreflabel="autosummarize">
+    <term><literal>autosummarize</literal> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>autosummarize</varname> storage parameter</primary>
+     </indexterm>
+    </term>
     <listitem>
     <para>
      Defines whether a summarization run is invoked for the previous page
@@ -523,8 +558,8 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ [ IF NOT EXISTS ] <replaceable class=
    </variablelist>
   </refsect2>
 
-  <refsect2 id="sql-createindex-concurrently">
-   <title id="sql-createindex-concurrently-title">Building Indexes Concurrently</title>
+  <refsect2 id="sql-createindex-concurrently" xreflabel="Building Indexes Concurrently">
+   <title>Building Indexes Concurrently</title>
 
    <indexterm zone="sql-createindex-concurrently">
    <primary>index</primary>
@@ -592,10 +627,8 @@ Indexes:
 
     The recommended recovery
     method in such cases is to drop the index and try again to perform
-    <command>CREATE INDEX CONCURRENTLY</command>.  (Another possibility is to rebuild
-    the index with <command>REINDEX</command>.  However, since <command>REINDEX</command>
-    does not support concurrent builds, this option is unlikely to seem
-    attractive.)
+    <command>CREATE INDEX CONCURRENTLY</command>.  (Another possibility is
+    to rebuild the index with <command>REINDEX INDEX CONCURRENTLY</command>).
    </para>
 
    <para>
@@ -616,12 +649,23 @@ Indexes:
 
    <para>
     Regular index builds permit other regular index builds on the
-    same table to occur in parallel, but only one concurrent index build
-    can occur on a table at a time.  In both cases, no other types of schema
-    modification on the table are allowed meanwhile.  Another difference
-    is that a regular <command>CREATE INDEX</command> command can be performed within
-    a transaction block, but <command>CREATE INDEX CONCURRENTLY</command> cannot.
+    same table to occur simultaneously, but only one concurrent index build
+    can occur on a table at a time.  In either case, schema modification of the
+    table is not allowed while the index is being built.  Another difference is
+    that a regular <command>CREATE INDEX</command> command can be performed
+    within a transaction block, but <command>CREATE INDEX CONCURRENTLY</command>
+    cannot.
    </para>
+
+   <para>
+    Concurrent builds for indexes on partitioned tables are currently not
+    supported.  However, you may concurrently build the index on each
+    partition individually and then finally create the partitioned index
+    non-concurrently in order to reduce the time where writes to the
+    partitioned table will be locked out.  In this case, building the
+    partitioned index is a metadata only operation.
+   </para>
+
   </refsect2>
  </refsect1>
 
@@ -643,8 +687,9 @@ Indexes:
   </para>
 
   <para>
-   An <firstterm>operator class</firstterm> can be specified for each
-   column of an index. The operator class identifies the operators to be
+   An <firstterm>operator class</firstterm> with optional parameters
+   can be specified for each column of an index.
+   The operator class identifies the operators to be
    used by the index for that column. For example, a B-tree index on
    four-byte integers would use the <literal>int4_ops</literal> class;
    this operator class includes comparison functions for four-byte
@@ -654,7 +699,7 @@ Indexes:
    ordering. For example, we might want to sort a complex-number data
    type either by absolute value or by real part. We could do this by
    defining two operator classes for the data type and then selecting
-   the proper class when making an index.  More information about
+   the proper class when creating an index.  More information about
    operator classes is in <xref linkend="indexes-opclass"/> and in <xref
    linkend="xindex"/>.
   </para>
@@ -672,12 +717,13 @@ Indexes:
    will be determined as if no index name had been specified in the
    command.
    If the <literal>ONLY</literal> option is specified, no recursion
-   is done, and the index is marked invalid
-   (<command>ALTER INDEX ... ATTACH PARTITION</command> turns the index
-   valid, once all partitions acquire the index.)  Note, however, that
-   any partition that is created in the future using
+   is done, and the index is marked invalid.
+   (<command>ALTER INDEX ... ATTACH PARTITION</command> marks the index
+   valid, once all partitions acquire matching indexes.)  Note, however,
+   that any partition that is created in the future using
    <command>CREATE TABLE ... PARTITION OF</command> will automatically
-   contain the index regardless of whether this option was specified.
+   have a matching index, regardless of whether <literal>ONLY</literal> is
+   specified.
   </para>
 
   <para>
@@ -789,10 +835,17 @@ CREATE UNIQUE INDEX title_idx ON films (title);
 
   <para>
    To create a unique B-tree index on the column <literal>title</literal>
-   and included columns <literal>director</literal> and <literal>rating</literal>
-   in the table <literal>films</literal>:
+   with included columns <literal>director</literal>
+   and <literal>rating</literal> in the table <literal>films</literal>:
 <programlisting>
 CREATE UNIQUE INDEX title_idx ON films (title) INCLUDE (director, rating);
+</programlisting>
+  </para>
+
+  <para>
+   To create a B-Tree index with deduplication disabled:
+<programlisting>
+CREATE INDEX title_idx ON films (title) WITH (deduplicate_items = off);
 </programlisting>
   </para>
 
@@ -879,6 +932,7 @@ CREATE INDEX CONCURRENTLY sales_quantity_index ON sales_table (quantity);
   <simplelist type="inline">
    <member><xref linkend="sql-alterindex"/></member>
    <member><xref linkend="sql-dropindex"/></member>
+   <member><xref linkend="sql-reindex"/></member>
   </simplelist>
  </refsect1>
 </refentry>

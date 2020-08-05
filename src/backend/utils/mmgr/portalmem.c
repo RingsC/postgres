@@ -8,7 +8,7 @@
  * doesn't actually run the executor for them.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -108,8 +108,8 @@ EnablePortalManager(void)
 	Assert(TopPortalContext == NULL);
 
 	TopPortalContext = AllocSetContextCreate(TopMemoryContext,
-										 "TopPortalContext",
-										 ALLOCSET_DEFAULT_SIZES);
+											 "TopPortalContext",
+											 ALLOCSET_DEFAULT_SIZES);
 
 	ctl.keysize = MAX_PORTALNAME_LEN;
 	ctl.entrysize = sizeof(PortalHashEnt);
@@ -281,7 +281,7 @@ void
 PortalDefineQuery(Portal portal,
 				  const char *prepStmtName,
 				  const char *sourceText,
-				  const char *commandTag,
+				  CommandTag commandTag,
 				  List *stmts,
 				  CachedPlan *cplan)
 {
@@ -289,10 +289,12 @@ PortalDefineQuery(Portal portal,
 	AssertState(portal->status == PORTAL_NEW);
 
 	AssertArg(sourceText != NULL);
-	AssertArg(commandTag != NULL || stmts == NIL);
+	AssertArg(commandTag != CMDTAG_UNKNOWN || stmts == NIL);
 
 	portal->prepStmtName = prepStmtName;
 	portal->sourceText = sourceText;
+	portal->qc.commandTag = commandTag;
+	portal->qc.nprocessed = 0;
 	portal->commandTag = commandTag;
 	portal->stmts = stmts;
 	portal->cplan = cplan;
@@ -630,8 +632,8 @@ static void
 HoldPortal(Portal portal)
 {
 	/*
-	 * Note that PersistHoldablePortal() must release all resources
-	 * used by the portal that are local to the creating transaction.
+	 * Note that PersistHoldablePortal() must release all resources used by
+	 * the portal that are local to the creating transaction.
 	 */
 	PortalCreateHoldStore(portal);
 	PersistHoldablePortal(portal);
@@ -640,15 +642,15 @@ HoldPortal(Portal portal)
 	PortalReleaseCachedPlan(portal);
 
 	/*
-	 * Any resources belonging to the portal will be released in the
-	 * upcoming transaction-wide cleanup; the portal will no longer
-	 * have its own resources.
+	 * Any resources belonging to the portal will be released in the upcoming
+	 * transaction-wide cleanup; the portal will no longer have its own
+	 * resources.
 	 */
 	portal->resowner = NULL;
 
 	/*
-	 * Having successfully exported the holdable cursor, mark it as
-	 * not belonging to this transaction.
+	 * Having successfully exported the holdable cursor, mark it as not
+	 * belonging to this transaction.
 	 */
 	portal->createSubid = InvalidSubTransactionId;
 	portal->activeSubid = InvalidSubTransactionId;
@@ -689,13 +691,23 @@ PreCommit_Portals(bool isPrepare)
 
 		/*
 		 * Do not touch active portals --- this can only happen in the case of
-		 * a multi-transaction utility command, such as VACUUM.
+		 * a multi-transaction utility command, such as VACUUM, or a commit in
+		 * a procedure.
 		 *
 		 * Note however that any resource owner attached to such a portal is
-		 * still going to go away, so don't leave a dangling pointer.
+		 * still going to go away, so don't leave a dangling pointer.  Also
+		 * unregister any snapshots held by the portal, mainly to avoid
+		 * snapshot leak warnings from ResourceOwnerRelease().
 		 */
 		if (portal->status == PORTAL_ACTIVE)
 		{
+			if (portal->holdSnapshot)
+			{
+				if (portal->resowner)
+					UnregisterSnapshotFromOwner(portal->holdSnapshot,
+												portal->resowner);
+				portal->holdSnapshot = NULL;
+			}
 			portal->resowner = NULL;
 			continue;
 		}
@@ -1125,8 +1137,7 @@ pg_cursor(PG_FUNCTION_ARGS)
 	if (!(rsinfo->allowedModes & SFRM_Materialize))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not " \
-						"allowed in this context")));
+				 errmsg("materialize mode required, but it is not allowed in this context")));
 
 	/* need to build tuplestore in query context */
 	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
@@ -1136,7 +1147,7 @@ pg_cursor(PG_FUNCTION_ARGS)
 	 * build tupdesc for result tuples. This must match the definition of the
 	 * pg_cursors view in system_views.sql
 	 */
-	tupdesc = CreateTemplateTupleDesc(6, false);
+	tupdesc = CreateTemplateTupleDesc(6);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "name",
 					   TEXTOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "statement",
@@ -1216,13 +1227,19 @@ ThereAreNoReadyPortals(void)
 /*
  * Hold all pinned portals.
  *
- * A procedural language implementation that uses pinned portals for its
- * internally generated cursors can call this in its COMMIT command to convert
- * those cursors to held cursors, so that they survive the transaction end.
- * We mark those portals as "auto-held" so that exception exit knows to clean
- * them up.  (In normal, non-exception code paths, the PL needs to clean those
- * portals itself, since transaction end won't do it anymore, but that should
- * be normal practice anyway.)
+ * When initiating a COMMIT or ROLLBACK inside a procedure, this must be
+ * called to protect internally-generated cursors from being dropped during
+ * the transaction shutdown.  Currently, SPI calls this automatically; PLs
+ * that initiate COMMIT or ROLLBACK some other way are on the hook to do it
+ * themselves.  (Note that we couldn't do this in, say, AtAbort_Portals
+ * because we need to run user-defined code while persisting a portal.
+ * It's too late to do that once transaction abort has started.)
+ *
+ * We protect such portals by converting them to held cursors.  We mark them
+ * as "auto-held" so that exception exit knows to clean them up.  (In normal,
+ * non-exception code paths, the PL needs to clean such portals itself, since
+ * transaction end won't do it anymore; but that should be normal practice
+ * anyway.)
  */
 void
 HoldPinnedPortals(void)
@@ -1240,8 +1257,8 @@ HoldPinnedPortals(void)
 		{
 			/*
 			 * Doing transaction control, especially abort, inside a cursor
-			 * loop that is not read-only, for example using UPDATE
-			 * ... RETURNING, has weird semantics issues.  Also, this
+			 * loop that is not read-only, for example using UPDATE ...
+			 * RETURNING, has weird semantics issues.  Also, this
 			 * implementation wouldn't work, because such portals cannot be
 			 * held.  (The core grammar enforces that only SELECT statements
 			 * can drive a cursor, but for example PL/pgSQL does not restrict
@@ -1252,8 +1269,12 @@ HoldPinnedPortals(void)
 						(errcode(ERRCODE_INVALID_TRANSACTION_TERMINATION),
 						 errmsg("cannot perform transaction commands inside a cursor loop that is not read-only")));
 
-			portal->autoHeld = true;
+			/* Verify it's in a suitable state to be held */
+			if (portal->status != PORTAL_READY)
+				elog(ERROR, "pinned portal is not ready to be auto-held");
+
 			HoldPortal(portal);
+			portal->autoHeld = true;
 		}
 	}
 }

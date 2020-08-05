@@ -3,7 +3,7 @@
  * amutils.c
  *	  SQL-level APIs related to index access methods.
  *
- * Copyright (c) 2016-2018, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2020, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -187,8 +187,8 @@ indexam_property(FunctionCallInfo fcinfo,
 	}
 
 	/*
-	 * At this point, either index_oid == InvalidOid or it's a valid index OID.
-	 * Also, after this test and the one below, either attno == 0 for
+	 * At this point, either index_oid == InvalidOid or it's a valid index
+	 * OID. Also, after this test and the one below, either attno == 0 for
 	 * index-wide or AM-wide tests, or it's a valid column number in a valid
 	 * index.
 	 */
@@ -276,6 +276,7 @@ indexam_property(FunctionCallInfo fcinfo,
 				break;
 
 			case AMPROP_ORDERABLE:
+
 				/*
 				 * generic assumption is that nonkey columns are not orderable
 				 */
@@ -293,8 +294,9 @@ indexam_property(FunctionCallInfo fcinfo,
 				 * getting there from just the index column type seems like a
 				 * lot of work. So instead we expect the AM to handle this in
 				 * its amproperty routine. The generic result is to return
-				 * false if the AM says it never supports this, or if this is a
-				 * nonkey column, and null otherwise (meaning we don't know).
+				 * false if the AM says it never supports this, or if this is
+				 * a nonkey column, and null otherwise (meaning we don't
+				 * know).
 				 */
 				if (!iskey || !routine->amcanorderbyop)
 				{
@@ -314,8 +316,8 @@ indexam_property(FunctionCallInfo fcinfo,
 				{
 					/*
 					 * If possible, the AM should handle this test in its
-					 * amproperty function without opening the rel. But this is the
-					 * generic fallback if it does not.
+					 * amproperty function without opening the rel. But this
+					 * is the generic fallback if it does not.
 					 */
 					Relation	indexrel = index_open(index_oid, AccessShareLock);
 
@@ -442,4 +444,27 @@ pg_index_column_has_property(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	return indexam_property(fcinfo, propname, InvalidOid, relid, attno);
+}
+
+/*
+ * Return the name of the given phase, as used for progress reporting by the
+ * given AM.
+ */
+Datum
+pg_indexam_progress_phasename(PG_FUNCTION_ARGS)
+{
+	Oid			amoid = PG_GETARG_OID(0);
+	int32		phasenum = PG_GETARG_INT32(1);
+	IndexAmRoutine *routine;
+	char	   *name;
+
+	routine = GetIndexAmRoutineByAmId(amoid, true);
+	if (routine == NULL || !routine->ambuildphasename)
+		PG_RETURN_NULL();
+
+	name = routine->ambuildphasename(phasenum);
+	if (!name)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(CStringGetTextDatum(name));
 }

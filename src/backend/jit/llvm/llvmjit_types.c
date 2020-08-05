@@ -16,10 +16,10 @@
  * bitcode.
  *
  *
- * Copyright (c) 2016-2018, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *	  src/backend/lib/llvmjit_types.c
+ *	  src/backend/jit/llvm/llvmjit_types.c
  *
  *-------------------------------------------------------------------------
  */
@@ -49,17 +49,20 @@ PGFunction	TypePGFunction;
 size_t		TypeSizeT;
 bool		TypeStorageBool;
 
+NullableDatum StructNullableDatum;
 AggState	StructAggState;
 AggStatePerGroupData StructAggStatePerGroupData;
 AggStatePerTransData StructAggStatePerTransData;
 ExprContext StructExprContext;
 ExprEvalStep StructExprEvalStep;
 ExprState	StructExprState;
-FunctionCallInfoData StructFunctionCallInfoData;
+FunctionCallInfoBaseData StructFunctionCallInfoData;
 HeapTupleData StructHeapTupleData;
 MemoryContextData StructMemoryContextData;
 TupleTableSlot StructTupleTableSlot;
-struct tupleDesc StructtupleDesc;
+HeapTupleTableSlot StructHeapTupleTableSlot;
+MinimalTupleTableSlot StructMinimalTupleTableSlot;
+TupleDescData StructTupleDescData;
 
 
 /*
@@ -95,13 +98,43 @@ FunctionReturningBool(void)
  */
 void	   *referenced_functions[] =
 {
+	ExecAggInitGroup,
+	ExecAggTransReparent,
+	ExecEvalAggOrderedTransDatum,
+	ExecEvalAggOrderedTransTuple,
+	ExecEvalAlternativeSubPlan,
+	ExecEvalArrayCoerce,
+	ExecEvalArrayExpr,
+	ExecEvalConstraintCheck,
+	ExecEvalConstraintNotNull,
+	ExecEvalConvertRowtype,
+	ExecEvalCurrentOfExpr,
+	ExecEvalFieldSelect,
+	ExecEvalFieldStoreDeForm,
+	ExecEvalFieldStoreForm,
+	ExecEvalFuncExprFusage,
+	ExecEvalFuncExprStrictFusage,
+	ExecEvalGroupingFunc,
+	ExecEvalMinMax,
+	ExecEvalNextValueExpr,
+	ExecEvalParamExec,
+	ExecEvalParamExtern,
+	ExecEvalRow,
+	ExecEvalRowNotNull,
+	ExecEvalRowNull,
+	ExecEvalSQLValueFunction,
+	ExecEvalScalarArrayOp,
+	ExecEvalSubPlan,
+	ExecEvalSubscriptingRef,
+	ExecEvalSubscriptingRefAssign,
+	ExecEvalSubscriptingRefFetch,
+	ExecEvalSubscriptingRefOld,
+	ExecEvalSysVar,
+	ExecEvalWholeRowVar,
+	ExecEvalXmlExpr,
+	MakeExpandedObjectReadOnlyInternal,
+	slot_getmissingattrs,
+	slot_getsomeattrs_int,
 	strlen,
 	varsize_any,
-	slot_getsomeattrs,
-	slot_getmissingattrs,
-	heap_getsysattr,
-	MakeExpandedObjectReadOnlyInternal,
-	ExecEvalArrayRefSubscript,
-	ExecAggTransReparent,
-	ExecAggInitGroup
 };

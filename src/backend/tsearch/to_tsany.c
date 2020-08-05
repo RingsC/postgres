@@ -3,7 +3,7 @@
  * to_tsany.c
  *		to_ts* function definitions
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -13,10 +13,11 @@
  */
 #include "postgres.h"
 
+#include "common/jsonapi.h"
 #include "tsearch/ts_cache.h"
 #include "tsearch/ts_utils.h"
 #include "utils/builtins.h"
-#include "utils/jsonapi.h"
+#include "utils/jsonfuncs.h"
 
 
 typedef struct MorphOpaque
@@ -48,8 +49,7 @@ compareWORD(const void *a, const void *b)
 {
 	int			res;
 
-	res = tsCompareString(
-						  ((const ParsedWord *) a)->word, ((const ParsedWord *) a)->len,
+	res = tsCompareString(((const ParsedWord *) a)->word, ((const ParsedWord *) a)->len,
 						  ((const ParsedWord *) b)->word, ((const ParsedWord *) b)->len,
 						  false);
 
@@ -660,7 +660,7 @@ Datum
 websearch_to_tsquery_byid(PG_FUNCTION_ARGS)
 {
 	text	   *in = PG_GETARG_TEXT_PP(1);
-	MorphOpaque	data;
+	MorphOpaque data;
 	TSQuery		query = NULL;
 
 	data.cfg_id = PG_GETARG_OID(0);

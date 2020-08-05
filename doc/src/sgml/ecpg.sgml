@@ -1,7 +1,7 @@
 <!-- doc/src/sgml/ecpg.sgml -->
 
 <chapter id="ecpg">
- <title><application>ECPG</application> - Embedded <acronym>SQL</acronym> in C</title>
+ <title><application>ECPG</application> &mdash; Embedded <acronym>SQL</acronym> in C</title>
 
  <indexterm zone="ecpg"><primary>embedded SQL</primary><secondary>in C</secondary></indexterm>
  <indexterm zone="ecpg"><primary>C</primary></indexterm>
@@ -178,6 +178,19 @@ EXEC SQL CONNECT TO <replaceable>target</replaceable> <optional>AS <replaceable>
   </para>
 
   <para>
+   If the connection target includes any <replaceable>options</replaceable>,
+   those consist of
+   <literal><replaceable>keyword</replaceable>=<replaceable>value</replaceable></literal>
+   specifications separated by ampersands (<literal>&amp;</literal>).
+   The allowed key words are the same ones recognized
+   by <application>libpq</application> (see
+   <xref linkend="libpq-paramkeywords"/>).  Spaces are ignored before
+   any <replaceable>keyword</replaceable> or <replaceable>value</replaceable>,
+   though not within or after one.  Note that there is no way to
+   write <literal>&amp;</literal> within a <replaceable>value</replaceable>.
+  </para>
+
+  <para>
    The <replaceable>connection-name</replaceable> is used to handle
    multiple connections in one program.  It can be omitted if a
    program uses only one connection.  The most recently opened
@@ -191,7 +204,7 @@ EXEC SQL CONNECT TO <replaceable>target</replaceable> <optional>AS <replaceable>
    <link linkend="ddl-schemas-patterns">secure schema usage pattern</link>,
    begin each session by removing publicly-writable schemas
    from <varname>search_path</varname>.  For example,
-   add <literal>options=-csearch_path=</literal>
+   add <literal>options=-c search_path=</literal>
    to <literal><replaceable>options</replaceable></literal>, or
    issue <literal>EXEC SQL SELECT pg_catalog.set_config('search_path', '',
    false);</literal> after connecting.  This consideration is not specific to
@@ -547,7 +560,7 @@ EXEC SQL COMMIT;
        </para>
       </listitem>
      </varlistentry>
-     
+
      <varlistentry>
       <term><literal>EXEC SQL SET AUTOCOMMIT TO ON</literal></term>
       <listitem>
@@ -651,7 +664,7 @@ EXEC SQL DEALLOCATE PREPARE <replaceable>name</replaceable>;
    not really useful in real applications.  This section explains in
    detail how you can pass data between your C program and the
    embedded SQL statements using a simple mechanism called
-   <firstterm>host variables</firstterm>. In an embedded SQL program  we
+   <firstterm>host variables</firstterm>. In an embedded SQL program we
    consider the SQL statements to be <firstterm>guests</firstterm> in the C
    program code which is the <firstterm>host language</firstterm>. Therefore
    the variables of the C program are called <firstterm>host
@@ -906,7 +919,7 @@ do
 
       <row>
        <entry><type>character(<replaceable>n</replaceable>)</type>, <type>varchar(<replaceable>n</replaceable>)</type>, <type>text</type></entry>
-       <entry><type>char[<replaceable>n</replaceable>+1]</type>, <type>VARCHAR[<replaceable>n</replaceable>+1]</type><footnote><para>declared in <filename>ecpglib.h</filename></para></footnote></entry>
+       <entry><type>char[<replaceable>n</replaceable>+1]</type>, <type>VARCHAR[<replaceable>n</replaceable>+1]</type></entry>
       </row>
 
       <row>
@@ -936,7 +949,7 @@ do
 
       <row>
        <entry><type>bytea</type></entry>
-       <entry><type>char *</type></entry>
+       <entry><type>char *</type>, <type>bytea[<replaceable>n</replaceable>]</type></entry>
       </row>
      </tbody>
     </tgroup>
@@ -1030,7 +1043,7 @@ struct varchar_var { int len; char arr[180]; } var;
     </para>
 
     <sect4>
-     <title id="ecpg-type-timestamp-date">timestamp, date</title>
+     <title>timestamp, date</title>
 
      <para>
       Here is a pattern for handling <type>timestamp</type> variables
@@ -1192,6 +1205,36 @@ EXEC SQL END DECLARE SECTION;
 }
 </programlisting>
      </para>
+    </sect4>
+
+    <sect4>
+     <title>bytea</title>
+
+     <para>
+      The handling of the <type>bytea</type> type is similar to
+      that of <type>VARCHAR</type>. The definition on an array of type
+      <type>bytea</type> is converted into a named struct for every
+      variable. A declaration like:
+<programlisting>
+bytea var[180];
+</programlisting>
+     is converted into:
+<programlisting>
+struct bytea_var { int len; char arr[180]; } var;
+</programlisting>
+      The member <structfield>arr</structfield> hosts binary format
+      data. It can also handle <literal>'\0'</literal> as part of
+      data, unlike <type>VARCHAR</type>.
+      The data is converted from/to hex format and sent/received by
+      ecpglib.
+     </para>
+
+     <note>
+      <para>
+       <type>bytea</type> variable can be used only when
+       <xref linkend="guc-bytea-output"/> is set to <literal>hex</literal>.
+      </para>
+     </note>
     </sect4>
    </sect3>
 
@@ -1666,7 +1709,7 @@ while (1)
    </sect3>
 
    <sect3>
-    <title>User-defined Base Types</title>
+    <title>User-Defined Base Types</title>
 
     <para>
      New user-defined base types are not directly supported by ECPG.
@@ -1678,7 +1721,7 @@ while (1)
     <para>
      Here is an example using the data type <type>complex</type> from
      the example in <xref linkend="xtypes"/>.  The external string
-     representation of that type is <literal>(%lf,%lf)</literal>,
+     representation of that type is <literal>(%f,%f)</literal>,
      which is defined in the
      functions <function>complex_in()</function>
      and <function>complex_out()</function> functions
@@ -1951,10 +1994,22 @@ EXEC SQL SELECT started, duration INTO :ts1, :iv1 FROM datetbl WHERE d=:date1;
 PGTYPEStimestamp_add_interval(&ts1, &iv1, &tsout);
 out = PGTYPEStimestamp_to_asc(&tsout);
 printf("Started + duration: %s\n", out);
-free(out);
+PGTYPESchar_free(out);
 ]]>
 </programlisting>
   </para>
+
+  <sect2 id="ecpg-pgtypes-cstrings">
+   <title>Character Strings</title>
+   <para>
+   Some functions such as <function>PGTYPESnumeric_to_asc</function> return
+   a pointer to a freshly allocated character string. These results should be
+   freed with <function>PGTYPESchar_free</function> instead of
+   <function>free</function>. (This is important only on Windows, where
+   memory allocation and release sometimes need to be done by the same
+   library.)
+   </para>
+  </sect2>
 
   <sect2 id="ecpg-pgtypes-numeric">
    <title>The numeric Type</title>
@@ -2029,6 +2084,7 @@ char *PGTYPESnumeric_to_asc(numeric *num, int dscale);
 </synopsis>
        The numeric value will be printed with <literal>dscale</literal> decimal
        digits, with rounding applied if necessary.
+       The result must be freed with <function>PGTYPESchar_free()</function>.
       </para>
      </listitem>
     </varlistentry>
@@ -2419,6 +2475,7 @@ char *PGTYPESdate_to_asc(date dDate);
         The function receives the date <literal>dDate</literal> as its only parameter.
         It will output the date in the form <literal>1999-01-18</literal>, i.e., in the
         <literal>YYYY-MM-DD</literal> format.
+        The result must be freed with <function>PGTYPESchar_free()</function>.
        </para>
       </listitem>
      </varlistentry>
@@ -2841,6 +2898,7 @@ char *PGTYPEStimestamp_to_asc(timestamp tstamp);
         The function receives the timestamp <literal>tstamp</literal> as
         its only argument and returns an allocated string that contains the
         textual representation of the timestamp.
+        The result must be freed with <function>PGTYPESchar_free()</function>.
        </para>
       </listitem>
      </varlistentry>
@@ -2931,7 +2989,7 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%d</literal> - is replaced by the day of the month as a
-           decimal number (01-31).
+           decimal number (01&ndash;31).
           </para>
          </listitem>
          <listitem>
@@ -2967,7 +3025,7 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%e</literal> - is replaced by the day of month as a decimal
-           number (1-31); single digits are preceded by a blank.
+           number (1&ndash;31); single digits are preceded by a blank.
           </para>
          </listitem>
          <listitem>
@@ -2986,13 +3044,13 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
           <para>
            <literal>%g</literal> - is replaced by the same year as in
            <literal>%G</literal>, but as a decimal number without century
-           (00-99).
+           (00&ndash;99).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%H</literal> - is replaced by the hour (24-hour clock) as a
-           decimal number (00-23).
+           decimal number (00&ndash;23).
           </para>
          </listitem>
          <listitem>
@@ -3003,37 +3061,37 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%I</literal> - is replaced by the hour (12-hour clock) as a
-           decimal number (01-12).
+           decimal number (01&ndash;12).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%j</literal> - is replaced by the day of the year as a
-           decimal number (001-366).
+           decimal number (001&ndash;366).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%k</literal> - is replaced by the hour (24-hour clock) as a
-           decimal number (0-23); single digits are preceded by a blank.
+           decimal number (0&ndash;23); single digits are preceded by a blank.
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%l</literal> - is replaced by the hour (12-hour clock) as a
-           decimal number (1-12); single digits are preceded by a blank.
+           decimal number (1&ndash;12); single digits are preceded by a blank.
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%M</literal> - is replaced by the minute as a decimal
-           number (00-59).
+           number (00&ndash;59).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%m</literal> - is replaced by the month as a decimal number
-           (01-12).
+           (01&ndash;12).
           </para>
          </listitem>
          <listitem>
@@ -3066,7 +3124,7 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%S</literal> - is replaced by the second as a decimal
-           number (00-60).
+           number (00&ndash;60).
           </para>
          </listitem>
          <listitem>
@@ -3088,19 +3146,19 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%U</literal> - is replaced by the week number of the year
-           (Sunday as the first day of the week) as a decimal number (00-53).
+           (Sunday as the first day of the week) as a decimal number (00&ndash;53).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%u</literal> - is replaced by the weekday (Monday as the
-           first day of the week) as a decimal number (1-7).
+           first day of the week) as a decimal number (1&ndash;7).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%V</literal> - is replaced by the week number of the year
-           (Monday as the first day of the week) as a decimal number (01-53).
+           (Monday as the first day of the week) as a decimal number (01&ndash;53).
            If the week containing January 1 has four or more days in the new
            year, then it is week 1; otherwise it is the last week of the
            previous year, and the next week is week 1.
@@ -3115,13 +3173,13 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%W</literal> - is replaced by the week number of the year
-           (Monday as the first day of the week) as a decimal number (00-53).
+           (Monday as the first day of the week) as a decimal number (00&ndash;53).
           </para>
          </listitem>
          <listitem>
           <para>
            <literal>%w</literal> - is replaced by the weekday (Sunday as the
-           first day of the week) as a decimal number (0-6).
+           first day of the week) as a decimal number (0&ndash;6).
           </para>
          </listitem>
          <listitem>
@@ -3145,7 +3203,7 @@ int PGTYPEStimestamp_fmt_asc(timestamp *ts, char *output, int str_len, char *fmt
          <listitem>
           <para>
            <literal>%y</literal> - is replaced by the year without century as a
-           decimal number (00-99).
+           decimal number (00&ndash;99).
           </para>
          </listitem>
          <listitem>
@@ -3314,7 +3372,7 @@ interval *PGTYPESinterval_new(void);
        <para>
         Release the memory of a previously allocated interval variable.
 <synopsis>
-void PGTYPESinterval_new(interval *intvl);
+void PGTYPESinterval_free(interval *intvl);
 </synopsis>
        </para>
       </listitem>
@@ -3349,6 +3407,7 @@ char *PGTYPESinterval_to_asc(interval *span);
         The function converts the interval variable that <literal>span</literal>
         points to into a C char*. The output looks like this example:
         <literal>@ 1 day 12 hours 59 mins 10 secs</literal>.
+        The result must be freed with <function>PGTYPESchar_free()</function>.
        </para>
       </listitem>
      </varlistentry>
@@ -4788,7 +4847,7 @@ EXEC SQL WHENEVER <replaceable>condition</replaceable> <replaceable>action</repl
       <listitem>
        <para>
         Execute the C statement <literal>continue</literal>.  This should
-        only be used in loops statements.  if executed, will cause the flow 
+        only be used in loops statements.  if executed, will cause the flow
         of control to return to the top of the loop.
        </para>
       </listitem>
@@ -4954,7 +5013,7 @@ struct
 
    <para>
     The fields <structfield>sqlcaid</structfield>,
-    <structfield>sqlcabc</structfield>,
+    <structfield>sqlabc</structfield>,
     <structfield>sqlerrp</structfield>, and the remaining elements of
     <structfield>sqlerrd</structfield> and
     <structfield>sqlwarn</structfield> currently contain no useful
@@ -5636,7 +5695,7 @@ EXEC SQL UPDATE Tbl SET col = MYNUMBER;
   </sect2>
 
   <sect2 id="ecpg-ifdef">
-   <title>ifdef, ifndef, else, elif, and endif Directives</title>
+   <title>ifdef, ifndef, elif, else, and endif Directives</title>
    <para>
    You can use the following directives to compile code sections conditionally:
 
@@ -5646,7 +5705,7 @@ EXEC SQL UPDATE Tbl SET col = MYNUMBER;
      <listitem>
      <para>
       Checks a <replaceable>name</replaceable> and processes subsequent lines if
-      <replaceable>name</replaceable> has been created with <literal>EXEC SQL define
+      <replaceable>name</replaceable> has been defined via <literal>EXEC SQL define
       <replaceable>name</replaceable></literal>.
      </para>
      </listitem>
@@ -5657,19 +5716,8 @@ EXEC SQL UPDATE Tbl SET col = MYNUMBER;
      <listitem>
      <para>
       Checks a <replaceable>name</replaceable> and processes subsequent lines if
-      <replaceable>name</replaceable> has <emphasis>not</emphasis> been created with
+      <replaceable>name</replaceable> has <emphasis>not</emphasis> been defined via
       <literal>EXEC SQL define <replaceable>name</replaceable></literal>.
-     </para>
-     </listitem>
-    </varlistentry>
-
-    <varlistentry>
-     <term><literal>EXEC SQL else;</literal></term>
-     <listitem>
-     <para>
-      Starts processing an alternative section to a section introduced by
-      either <literal>EXEC SQL ifdef <replaceable>name</replaceable></literal> or
-      <literal>EXEC SQL ifndef <replaceable>name</replaceable></literal>.
      </para>
      </listitem>
     </varlistentry>
@@ -5678,9 +5726,30 @@ EXEC SQL UPDATE Tbl SET col = MYNUMBER;
      <term><literal>EXEC SQL elif <replaceable>name</replaceable>;</literal></term>
      <listitem>
      <para>
-      Checks <replaceable>name</replaceable> and starts an alternative section if
-      <replaceable>name</replaceable> has been created with <literal>EXEC SQL define
-      <replaceable>name</replaceable></literal>.
+      Begins an optional alternative section after an
+      <literal>EXEC SQL ifdef <replaceable>name</replaceable></literal> or
+      <literal>EXEC SQL ifndef <replaceable>name</replaceable></literal>
+      directive.  Any number of <literal>elif</literal> sections can appear.
+      Lines following an <literal>elif</literal> will be processed
+      if <replaceable>name</replaceable> has been
+      defined <emphasis>and</emphasis> no previous section of the same
+      <literal>ifdef</literal>/<literal>ifndef</literal>...<literal>endif</literal>
+      construct has been processed.
+     </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>EXEC SQL else;</literal></term>
+     <listitem>
+     <para>
+      Begins an optional, final alternative section after an
+      <literal>EXEC SQL ifdef <replaceable>name</replaceable></literal> or
+      <literal>EXEC SQL ifndef <replaceable>name</replaceable></literal>
+      directive.  Subsequent lines will be processed if no previous section
+      of the same
+      <literal>ifdef</literal>/<literal>ifndef</literal>...<literal>endif</literal>
+      construct has been processed.
      </para>
      </listitem>
     </varlistentry>
@@ -5689,7 +5758,9 @@ EXEC SQL UPDATE Tbl SET col = MYNUMBER;
      <term><literal>EXEC SQL endif;</literal></term>
      <listitem>
      <para>
-      Ends an alternative section.
+      Ends an
+      <literal>ifdef</literal>/<literal>ifndef</literal>...<literal>endif</literal>
+      construct.  Subsequent lines are processed normally.
      </para>
      </listitem>
     </varlistentry>
@@ -5697,14 +5768,20 @@ EXEC SQL UPDATE Tbl SET col = MYNUMBER;
    </para>
 
    <para>
-    Example:
+    <literal>ifdef</literal>/<literal>ifndef</literal>...<literal>endif</literal>
+    constructs can be nested, up to 127 levels deep.
+   </para>
+
+   <para>
+    This example will compile exactly one of the three <literal>SET
+    TIMEZONE</literal> commands:
 <programlisting>
-EXEC SQL ifndef TZVAR;
-EXEC SQL SET TIMEZONE TO 'GMT';
+EXEC SQL ifdef TZVAR;
+EXEC SQL SET TIMEZONE TO TZVAR;
 EXEC SQL elif TZNAME;
 EXEC SQL SET TIMEZONE TO TZNAME;
 EXEC SQL else;
-EXEC SQL SET TIMEZONE TO TZVAR;
+EXEC SQL SET TIMEZONE TO 'GMT';
 EXEC SQL endif;
 </programlisting>
    </para>
@@ -5858,7 +5935,7 @@ ECPG = ecpg
      <para>
        <function>ECPGtransactionStatus(const char *<replaceable>connection_name</replaceable>)</function>
        returns the current transaction status of the given connection identified by <replaceable>connection_name</replaceable>.
-       See <xref linkend="libpq-status"/> and libpq's <function>PQtransactionStatus()</function> for details about the returned status codes.
+       See <xref linkend="libpq-status"/> and libpq's <xref linkend="libpq-PQtransactionStatus"/> for details about the returned status codes.
      </para>
    </listitem>
 
@@ -6442,7 +6519,7 @@ DATABASE <replaceable>connection_target</replaceable>
      </varlistentry>
 
      <varlistentry>
-      <term><replaceable class="parameter">connection_object</replaceable></term>
+      <term><replaceable class="parameter">connection_name</replaceable></term>
       <listitem>
        <para>
         An optional identifier for the connection, so that it can be
@@ -8182,7 +8259,7 @@ if (*(int2 *)sqldata->sqlvar[i].sqlind != 0)
      <term><literal>sqlformat</literal></term>
       <listitem>
        <para>
-        Reserved in Informix, value of <function>PQfformat()</function> for the field.
+        Reserved in Informix, value of <xref linkend="libpq-PQfformat"/> for the field.
        </para>
       </listitem>
      </varlistentry>
@@ -8211,7 +8288,7 @@ if (*(int2 *)sqldata->sqlvar[i].sqlind != 0)
      <term><literal>sqlxid</literal></term>
       <listitem>
        <para>
-        Extended type of the field, result of <function>PQftype()</function>.
+        Extended type of the field, result of <xref linkend="libpq-PQftype"/>.
        </para>
       </listitem>
      </varlistentry>

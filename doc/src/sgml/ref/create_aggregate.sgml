@@ -21,13 +21,13 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-CREATE AGGREGATE <replaceable class="parameter">name</replaceable> ( [ <replaceable class="parameter">argmode</replaceable> ] [ <replaceable class="parameter">argname</replaceable> ] <replaceable class="parameter">arg_data_type</replaceable> [ , ... ] ) (
+CREATE [ OR REPLACE ] AGGREGATE <replaceable class="parameter">name</replaceable> ( [ <replaceable class="parameter">argmode</replaceable> ] [ <replaceable class="parameter">argname</replaceable> ] <replaceable class="parameter">arg_data_type</replaceable> [ , ... ] ) (
     SFUNC = <replaceable class="parameter">sfunc</replaceable>,
     STYPE = <replaceable class="parameter">state_data_type</replaceable>
     [ , SSPACE = <replaceable class="parameter">state_data_size</replaceable> ]
     [ , FINALFUNC = <replaceable class="parameter">ffunc</replaceable> ]
     [ , FINALFUNC_EXTRA ]
-    [ , FINALFUNC_MODIFY = { READ_ONLY | SHARABLE | READ_WRITE } ]
+    [ , FINALFUNC_MODIFY = { READ_ONLY | SHAREABLE | READ_WRITE } ]
     [ , COMBINEFUNC = <replaceable class="parameter">combinefunc</replaceable> ]
     [ , SERIALFUNC = <replaceable class="parameter">serialfunc</replaceable> ]
     [ , DESERIALFUNC = <replaceable class="parameter">deserialfunc</replaceable> ]
@@ -38,20 +38,20 @@ CREATE AGGREGATE <replaceable class="parameter">name</replaceable> ( [ <replacea
     [ , MSSPACE = <replaceable class="parameter">mstate_data_size</replaceable> ]
     [ , MFINALFUNC = <replaceable class="parameter">mffunc</replaceable> ]
     [ , MFINALFUNC_EXTRA ]
-    [ , MFINALFUNC_MODIFY = { READ_ONLY | SHARABLE | READ_WRITE } ]
+    [ , MFINALFUNC_MODIFY = { READ_ONLY | SHAREABLE | READ_WRITE } ]
     [ , MINITCOND = <replaceable class="parameter">minitial_condition</replaceable> ]
     [ , SORTOP = <replaceable class="parameter">sort_operator</replaceable> ]
     [ , PARALLEL = { SAFE | RESTRICTED | UNSAFE } ]
 )
 
-CREATE AGGREGATE <replaceable class="parameter">name</replaceable> ( [ [ <replaceable class="parameter">argmode</replaceable> ] [ <replaceable class="parameter">argname</replaceable> ] <replaceable class="parameter">arg_data_type</replaceable> [ , ... ] ]
+CREATE [ OR REPLACE ] AGGREGATE <replaceable class="parameter">name</replaceable> ( [ [ <replaceable class="parameter">argmode</replaceable> ] [ <replaceable class="parameter">argname</replaceable> ] <replaceable class="parameter">arg_data_type</replaceable> [ , ... ] ]
                         ORDER BY [ <replaceable class="parameter">argmode</replaceable> ] [ <replaceable class="parameter">argname</replaceable> ] <replaceable class="parameter">arg_data_type</replaceable> [ , ... ] ) (
     SFUNC = <replaceable class="parameter">sfunc</replaceable>,
     STYPE = <replaceable class="parameter">state_data_type</replaceable>
     [ , SSPACE = <replaceable class="parameter">state_data_size</replaceable> ]
     [ , FINALFUNC = <replaceable class="parameter">ffunc</replaceable> ]
     [ , FINALFUNC_EXTRA ]
-    [ , FINALFUNC_MODIFY = { READ_ONLY | SHARABLE | READ_WRITE } ]
+    [ , FINALFUNC_MODIFY = { READ_ONLY | SHAREABLE | READ_WRITE } ]
     [ , INITCOND = <replaceable class="parameter">initial_condition</replaceable> ]
     [ , PARALLEL = { SAFE | RESTRICTED | UNSAFE } ]
     [ , HYPOTHETICAL ]
@@ -59,14 +59,14 @@ CREATE AGGREGATE <replaceable class="parameter">name</replaceable> ( [ [ <replac
 
 <phrase>or the old syntax</phrase>
 
-CREATE AGGREGATE <replaceable class="parameter">name</replaceable> (
+CREATE [ OR REPLACE ] AGGREGATE <replaceable class="parameter">name</replaceable> (
     BASETYPE = <replaceable class="parameter">base_type</replaceable>,
     SFUNC = <replaceable class="parameter">sfunc</replaceable>,
     STYPE = <replaceable class="parameter">state_data_type</replaceable>
     [ , SSPACE = <replaceable class="parameter">state_data_size</replaceable> ]
     [ , FINALFUNC = <replaceable class="parameter">ffunc</replaceable> ]
     [ , FINALFUNC_EXTRA ]
-    [ , FINALFUNC_MODIFY = { READ_ONLY | SHARABLE | READ_WRITE } ]
+    [ , FINALFUNC_MODIFY = { READ_ONLY | SHAREABLE | READ_WRITE } ]
     [ , COMBINEFUNC = <replaceable class="parameter">combinefunc</replaceable> ]
     [ , SERIALFUNC = <replaceable class="parameter">serialfunc</replaceable> ]
     [ , DESERIALFUNC = <replaceable class="parameter">deserialfunc</replaceable> ]
@@ -77,7 +77,7 @@ CREATE AGGREGATE <replaceable class="parameter">name</replaceable> (
     [ , MSSPACE = <replaceable class="parameter">mstate_data_size</replaceable> ]
     [ , MFINALFUNC = <replaceable class="parameter">mffunc</replaceable> ]
     [ , MFINALFUNC_EXTRA ]
-    [ , MFINALFUNC_MODIFY = { READ_ONLY | SHARABLE | READ_WRITE } ]
+    [ , MFINALFUNC_MODIFY = { READ_ONLY | SHAREABLE | READ_WRITE } ]
     [ , MINITCOND = <replaceable class="parameter">minitial_condition</replaceable> ]
     [ , SORTOP = <replaceable class="parameter">sort_operator</replaceable> ]
 )
@@ -88,12 +88,21 @@ CREATE AGGREGATE <replaceable class="parameter">name</replaceable> (
   <title>Description</title>
 
   <para>
-   <command>CREATE AGGREGATE</command> defines a new aggregate
-   function. Some basic and commonly-used aggregate functions are
-   included with the distribution; they are documented in <xref
-   linkend="functions-aggregate"/>. If one defines new types or needs
-   an aggregate function not already provided, then <command>CREATE
-   AGGREGATE</command> can be used to provide the desired features.
+   <command>CREATE AGGREGATE</command> defines a new aggregate function.
+   <command>CREATE OR REPLACE AGGREGATE</command> will either define a new
+   aggregate function or replace an existing definition. Some basic and
+   commonly-used aggregate functions are included with the distribution; they
+   are documented in <xref linkend="functions-aggregate"/>. If one defines new
+   types or needs an aggregate function not already provided, then
+   <command>CREATE AGGREGATE</command> can be used to provide the desired
+   features.
+  </para>
+
+  <para>
+   When replacing an existing definition, the argument types, result type,
+   and number of direct arguments may not be changed. Also, the new definition
+   must be of the same kind (ordinary aggregate, ordered-set aggregate, or
+   hypothetical-set aggregate) as the old one.
   </para>
 
   <para>
@@ -202,7 +211,7 @@ CREATE AGGREGATE <replaceable class="parameter">name</replaceable> (
    as described in <xref linkend="xaggr-moving-aggregates"/>.  This requires
    specifying the <literal>MSFUNC</literal>, <literal>MINVFUNC</literal>,
    and <literal>MSTYPE</literal> parameters, and optionally
-   the <literal>MSPACE</literal>, <literal>MFINALFUNC</literal>,
+   the <literal>MSSPACE</literal>, <literal>MFINALFUNC</literal>,
    <literal>MFINALFUNC_EXTRA</literal>, <literal>MFINALFUNC_MODIFY</literal>,
    and <literal>MINITCOND</literal> parameters.  Except for <literal>MINVFUNC</literal>,
    these parameters work like the corresponding simple-aggregate parameters
@@ -377,10 +386,7 @@ SELECT col FROM tab ORDER BY col USING sortop LIMIT 1;
       If this parameter is omitted or is zero, a default estimate is used
       based on the <replaceable>state_data_type</replaceable>.
       The planner uses this value to estimate the memory required for a
-      grouped aggregate query.  The planner will consider using hash
-      aggregation for such a query only if the hash table is estimated to fit
-      in <xref linkend="guc-work-mem"/>; therefore, large values of this
-      parameter discourage use of hash aggregation.
+      grouped aggregate query.
      </para>
     </listitem>
    </varlistentry>
@@ -419,14 +425,14 @@ SELECT col FROM tab ORDER BY col USING sortop LIMIT 1;
    </varlistentry>
 
    <varlistentry>
-    <term><literal>FINALFUNC_MODIFY</literal> = { <literal>READ_ONLY</literal> | <literal>SHARABLE</literal> | <literal>READ_WRITE</literal> }</term>
+    <term><literal>FINALFUNC_MODIFY</literal> = { <literal>READ_ONLY</literal> | <literal>SHAREABLE</literal> | <literal>READ_WRITE</literal> }</term>
     <listitem>
      <para>
       This option specifies whether the final function is a pure function
       that does not modify its arguments.  <literal>READ_ONLY</literal> indicates
       it does not; the other two values indicate that it may change the
-      transition state value.  See <xref linkend="sql-createaggregate-notes"
-      endterm="sql-createaggregate-notes-title"/> below for more detail.  The
+      transition state value.  See <xref linkend="sql-createaggregate-notes"/>
+      below for more detail.  The
       default is <literal>READ_ONLY</literal>, except for ordered-set aggregates,
       for which the default is <literal>READ_WRITE</literal>.
      </para>
@@ -585,7 +591,7 @@ SELECT col FROM tab ORDER BY col USING sortop LIMIT 1;
    </varlistentry>
 
    <varlistentry>
-    <term><literal>MFINALFUNC_MODIFY</literal> = { <literal>READ_ONLY</literal> | <literal>SHARABLE</literal> | <literal>READ_WRITE</literal> }</term>
+    <term><literal>MFINALFUNC_MODIFY</literal> = { <literal>READ_ONLY</literal> | <literal>SHAREABLE</literal> | <literal>READ_WRITE</literal> }</term>
     <listitem>
      <para>
       This option is like <literal>FINALFUNC_MODIFY</literal>, but it describes
@@ -655,8 +661,8 @@ SELECT col FROM tab ORDER BY col USING sortop LIMIT 1;
   </para>
  </refsect1>
 
- <refsect1 id="sql-createaggregate-notes">
-  <title id="sql-createaggregate-notes-title">Notes</title>
+ <refsect1 id="sql-createaggregate-notes" xreflabel="Notes">
+  <title>Notes</title>
 
    <para>
     In parameters that specify support function names, you can write
@@ -678,12 +684,13 @@ SELECT col FROM tab ORDER BY col USING sortop LIMIT 1;
     Likewise, while an aggregate final function is normally expected not to
     modify its input values, sometimes it is impractical to avoid modifying
     the transition-state argument.  Such behavior must be declared using
-    the <literal>FINALFUNC_MODIFY</literal> parameter.  The <literal>READ_WRITE</literal>
+    the <literal>FINALFUNC_MODIFY</literal> parameter.
+    The <literal>READ_WRITE</literal>
     value indicates that the final function modifies the transition state in
     unspecified ways.  This value prevents use of the aggregate as a window
     function, and it also prevents merging of transition states for aggregate
     calls that share the same input values and transition functions.
-    The <literal>SHARABLE</literal> value indicates that the transition function
+    The <literal>SHAREABLE</literal> value indicates that the transition function
     cannot be applied after the final function, but multiple final-function
     calls can be performed on the ending transition state value.  This value
     prevents use of the aggregate as a window function, but it allows merging

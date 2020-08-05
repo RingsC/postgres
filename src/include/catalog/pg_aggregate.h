@@ -4,7 +4,7 @@
  *	  definition of the "aggregate" system catalog (pg_aggregate)
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_aggregate.h
@@ -29,7 +29,7 @@
  *		cpp turns this into typedef struct FormData_pg_aggregate
  * ----------------------------------------------------------------
  */
-CATALOG(pg_aggregate,2600,AggregateRelationId) BKI_WITHOUT_OIDS
+CATALOG(pg_aggregate,2600,AggregateRelationId)
 {
 	/* pg_proc OID of the aggregate itself */
 	regproc		aggfnoid BKI_LOOKUP(pg_proc);
@@ -134,42 +134,43 @@ typedef FormData_pg_aggregate *Form_pg_aggregate;
  * transfn cannot be applied anymore after the first finalfn call.
  */
 #define AGGMODIFY_READ_ONLY			'r'
-#define AGGMODIFY_SHARABLE			's'
+#define AGGMODIFY_SHAREABLE			's'
 #define AGGMODIFY_READ_WRITE		'w'
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 
 
 extern ObjectAddress AggregateCreate(const char *aggName,
-				Oid aggNamespace,
-				char aggKind,
-				int numArgs,
-				int numDirectArgs,
-				oidvector *parameterTypes,
-				Datum allParameterTypes,
-				Datum parameterModes,
-				Datum parameterNames,
-				List *parameterDefaults,
-				Oid variadicArgType,
-				List *aggtransfnName,
-				List *aggfinalfnName,
-				List *aggcombinefnName,
-				List *aggserialfnName,
-				List *aggdeserialfnName,
-				List *aggmtransfnName,
-				List *aggminvtransfnName,
-				List *aggmfinalfnName,
-				bool finalfnExtraArgs,
-				bool mfinalfnExtraArgs,
-				char finalfnModify,
-				char mfinalfnModify,
-				List *aggsortopName,
-				Oid aggTransType,
-				int32 aggTransSpace,
-				Oid aggmTransType,
-				int32 aggmTransSpace,
-				const char *agginitval,
-				const char *aggminitval,
-				char proparallel);
+									 Oid aggNamespace,
+									 bool replace,
+									 char aggKind,
+									 int numArgs,
+									 int numDirectArgs,
+									 oidvector *parameterTypes,
+									 Datum allParameterTypes,
+									 Datum parameterModes,
+									 Datum parameterNames,
+									 List *parameterDefaults,
+									 Oid variadicArgType,
+									 List *aggtransfnName,
+									 List *aggfinalfnName,
+									 List *aggcombinefnName,
+									 List *aggserialfnName,
+									 List *aggdeserialfnName,
+									 List *aggmtransfnName,
+									 List *aggminvtransfnName,
+									 List *aggmfinalfnName,
+									 bool finalfnExtraArgs,
+									 bool mfinalfnExtraArgs,
+									 char finalfnModify,
+									 char mfinalfnModify,
+									 List *aggsortopName,
+									 Oid aggTransType,
+									 int32 aggTransSpace,
+									 Oid aggmTransType,
+									 int32 aggmTransSpace,
+									 const char *agginitval,
+									 const char *aggminitval,
+									 char proparallel);
 
 #endif							/* PG_AGGREGATE_H */

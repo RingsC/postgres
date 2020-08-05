@@ -3,7 +3,7 @@
  * nodeMergejoin.c
  *	  routines supporting merge joins
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1436,7 +1436,9 @@ MergeJoinState *
 ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 {
 	MergeJoinState *mergestate;
-	TupleDesc	outerDesc, innerDesc;
+	TupleDesc	outerDesc,
+				innerDesc;
+	const TupleTableSlotOps *innerOps;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -1511,13 +1513,15 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 	/*
 	 * Initialize result slot, type and projection.
 	 */
-	ExecInitResultTupleSlotTL(estate, &mergestate->js.ps);
+	ExecInitResultTupleSlotTL(&mergestate->js.ps, &TTSOpsVirtual);
 	ExecAssignProjectionInfo(&mergestate->js.ps, NULL);
 
 	/*
 	 * tuple table initialization
 	 */
-	mergestate->mj_MarkedTupleSlot = ExecInitExtraTupleSlot(estate, innerDesc);
+	innerOps = ExecGetResultSlotOps(innerPlanState(mergestate), NULL);
+	mergestate->mj_MarkedTupleSlot = ExecInitExtraTupleSlot(estate, innerDesc,
+															innerOps);
 
 	/*
 	 * initialize child expressions
@@ -1547,13 +1551,13 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 			mergestate->mj_FillOuter = true;
 			mergestate->mj_FillInner = false;
 			mergestate->mj_NullInnerTupleSlot =
-				ExecInitNullTupleSlot(estate, innerDesc);
+				ExecInitNullTupleSlot(estate, innerDesc, &TTSOpsVirtual);
 			break;
 		case JOIN_RIGHT:
 			mergestate->mj_FillOuter = false;
 			mergestate->mj_FillInner = true;
 			mergestate->mj_NullOuterTupleSlot =
-				ExecInitNullTupleSlot(estate, outerDesc);
+				ExecInitNullTupleSlot(estate, outerDesc, &TTSOpsVirtual);
 
 			/*
 			 * Can't handle right or full join with non-constant extra
@@ -1569,9 +1573,9 @@ ExecInitMergeJoin(MergeJoin *node, EState *estate, int eflags)
 			mergestate->mj_FillOuter = true;
 			mergestate->mj_FillInner = true;
 			mergestate->mj_NullOuterTupleSlot =
-				ExecInitNullTupleSlot(estate, outerDesc);
+				ExecInitNullTupleSlot(estate, outerDesc, &TTSOpsVirtual);
 			mergestate->mj_NullInnerTupleSlot =
-				ExecInitNullTupleSlot(estate, innerDesc);
+				ExecInitNullTupleSlot(estate, innerDesc, &TTSOpsVirtual);
 
 			/*
 			 * Can't handle right or full join with non-constant extra

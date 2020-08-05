@@ -1,7 +1,7 @@
 /* src/interfaces/ecpg/preproc/ecpg.c */
 
 /* Main for ecpg, the PostgreSQL embedded SQL precompiler. */
-/* Copyright (c) 1996-2018, PostgreSQL Global Development Group */
+/* Copyright (c) 1996-2020, PostgreSQL Global Development Group */
 
 #include "postgres_fe.h"
 
@@ -9,7 +9,7 @@
 
 #include "getopt_long.h"
 
-#include "extern.h"
+#include "preproc_extern.h"
 
 int			ret_value = 0;
 bool		autocommit = false,
@@ -58,7 +58,8 @@ help(const char *progname)
 	printf(_("  -?, --help     show this help, then exit\n"));
 	printf(_("\nIf no output file is specified, the name is formed by adding .c to the\n"
 			 "input file name, after stripping off .pgc if present.\n"));
-	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));
+	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
+	printf(_("%s home page: <%s>\n"), PACKAGE_NAME, PACKAGE_URL);
 }
 
 static void
@@ -98,13 +99,13 @@ add_preprocessor_define(char *define)
 		/* symbol has a value */
 		for (tmp = ptr - 1; *tmp == ' '; tmp--);
 		tmp[1] = '\0';
-		defines->old = define_copy;
-		defines->new = ptr + 1;
+		defines->olddef = define_copy;
+		defines->newdef = ptr + 1;
 	}
 	else
 	{
-		defines->old = define_copy;
-		defines->new = mm_strdup("1");
+		defines->olddef = define_copy;
+		defines->newdef = mm_strdup("1");
 	}
 	defines->pertinent = true;
 	defines->used = NULL;
@@ -149,7 +150,7 @@ main(int argc, char *const argv[])
 		}
 		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
 		{
-			printf("ecpg %s\n", PG_VERSION);
+			printf("ecpg (PostgreSQL) %s\n", PG_VERSION);
 			exit(0);
 		}
 	}
@@ -189,8 +190,8 @@ main(int argc, char *const argv[])
 				break;
 			case 'h':
 				header_mode = true;
-				/* this must include "-c" to make sense */
-				/* so do not place a "break;" here */
+				/* this must include "-c" to make sense, so fall through */
+				/* FALLTHROUGH */
 			case 'c':
 				auto_create_c = true;
 				break;
@@ -208,7 +209,7 @@ main(int argc, char *const argv[])
 					snprintf(informix_path, MAXPGPATH, "%s/informix/esql", pkginclude_path);
 					add_include_path(informix_path);
 				}
-				else if (strncmp(optarg, "ORACLE", strlen("ORACLE")) == 0)
+				else if (pg_strcasecmp(optarg, "ORACLE") == 0)
 				{
 					compat = ECPG_COMPAT_ORACLE;
 				}
@@ -219,11 +220,11 @@ main(int argc, char *const argv[])
 				}
 				break;
 			case 'r':
-				if (strcmp(optarg, "no_indicator") == 0)
+				if (pg_strcasecmp(optarg, "no_indicator") == 0)
 					force_indicator = false;
-				else if (strcmp(optarg, "prepare") == 0)
+				else if (pg_strcasecmp(optarg, "prepare") == 0)
 					auto_prepare = true;
-				else if (strcmp(optarg, "questionmarks") == 0)
+				else if (pg_strcasecmp(optarg, "questionmarks") == 0)
 					questionmarks = true;
 				else
 				{
@@ -378,8 +379,8 @@ main(int argc, char *const argv[])
 					defptr = defines;
 					defines = defines->next;
 
-					free(defptr->new);
-					free(defptr->old);
+					free(defptr->newdef);
+					free(defptr->olddef);
 					free(defptr);
 				}
 
@@ -391,8 +392,8 @@ main(int argc, char *const argv[])
 					{
 						defptr->next = this->next;
 
-						free(this->new);
-						free(this->old);
+						free(this->newdef);
+						free(this->olddef);
 						free(this);
 					}
 				}
@@ -479,7 +480,8 @@ main(int argc, char *const argv[])
 				}
 			}
 
-			if (output_filename && out_option == 0) {
+			if (output_filename && out_option == 0)
+			{
 				free(output_filename);
 				output_filename = NULL;
 			}

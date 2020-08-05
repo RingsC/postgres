@@ -4,7 +4,7 @@
  *	  definition of the "namespace" system catalog (pg_namespace)
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_namespace.h
@@ -20,6 +20,7 @@
 
 #include "catalog/genbki.h"
 #include "catalog/pg_namespace_d.h"
+#include "utils/acl.h"
 
 /* ----------------------------------------------------------------
  *		pg_namespace definition.
@@ -33,6 +34,8 @@
  */
 CATALOG(pg_namespace,2615,NamespaceRelationId)
 {
+	Oid			oid;			/* oid */
+
 	NameData	nspname;
 	Oid			nspowner;
 

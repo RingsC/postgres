@@ -5,9 +5,9 @@
 
 #include <ctype.h>
 
-#include "trgm.h"
-
 #include "catalog/pg_type.h"
+#include "lib/qunique.h"
+#include "trgm.h"
 #include "tsearch/ts_locale.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -48,14 +48,14 @@ typedef struct
 
 /* Trigram bound type */
 typedef uint8 TrgmBound;
-#define TRGM_BOUND_LEFT				(0x01) /* trigram is left bound of word */
-#define TRGM_BOUND_RIGHT			(0x02) /* trigram is right bound of word */
+#define TRGM_BOUND_LEFT				0x01	/* trigram is left bound of word */
+#define TRGM_BOUND_RIGHT			0x02	/* trigram is right bound of word */
 
 /* Word similarity flags */
-#define WORD_SIMILARITY_CHECK_ONLY	(0x01) /* if set then only check existence
-											* of similar search pattern in text */
-#define WORD_SIMILARITY_STRICT		(0x02) /* force bounds of extent to match
-											* word bounds */
+#define WORD_SIMILARITY_CHECK_ONLY	0x01	/* only check existence of similar
+											 * search pattern in text */
+#define WORD_SIMILARITY_STRICT		0x02	/* force bounds of extent to match
+											 * word bounds */
 
 /*
  * Module load callback
@@ -65,7 +65,7 @@ _PG_init(void)
 {
 	/* Define custom GUC variables. */
 	DefineCustomRealVariable("pg_trgm.similarity_threshold",
-							 "Sets the threshold used by the %% operator.",
+							 "Sets the threshold used by the % operator.",
 							 "Valid range is 0.0 .. 1.0.",
 							 &similarity_threshold,
 							 0.3,
@@ -77,7 +77,7 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 	DefineCustomRealVariable("pg_trgm.word_similarity_threshold",
-							 "Sets the threshold used by the <%% operator.",
+							 "Sets the threshold used by the <% operator.",
 							 "Valid range is 0.0 .. 1.0.",
 							 &word_similarity_threshold,
 							 0.6,
@@ -89,7 +89,7 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 	DefineCustomRealVariable("pg_trgm.strict_word_similarity_threshold",
-							 "Sets the threshold used by the <<%% operator.",
+							 "Sets the threshold used by the <<% operator.",
 							 "Valid range is 0.0 .. 1.0.",
 							 &strict_word_similarity_threshold,
 							 0.5,
@@ -144,7 +144,7 @@ index_strategy_get_limit(StrategyNumber strategy)
 			break;
 	}
 
-	return 0.0;	/* keep compiler quiet */
+	return 0.0;					/* keep compiler quiet */
 }
 
 /*
@@ -161,26 +161,6 @@ static int
 comp_trgm(const void *a, const void *b)
 {
 	return CMPTRGM(a, b);
-}
-
-static int
-unique_array(trgm *a, int len)
-{
-	trgm	   *curend,
-			   *tmp;
-
-	curend = tmp = a;
-	while (tmp - a < len)
-		if (CMPTRGM(tmp, curend))
-		{
-			curend++;
-			CPTRGM(curend, tmp);
-			tmp++;
-		}
-		else
-			tmp++;
-
-	return curend + 1 - a;
 }
 
 /*
@@ -395,7 +375,7 @@ generate_trgm(char *str, int slen)
 	if (len > 1)
 	{
 		qsort((void *) GETARR(trg), len, sizeof(trgm), comp_trgm);
-		len = unique_array(GETARR(trg), len);
+		len = qunique(GETARR(trg), len, sizeof(trgm), comp_trgm);
 	}
 
 	SET_VARSIZE(trg, CALCGTSIZE(ARRKEY, len));
@@ -468,7 +448,7 @@ comp_ptrgm(const void *v1, const void *v2)
  * ulen1: count of unique trigrams of array "trg1".
  * len2: length of array "trg2" and array "trg2indexes".
  * len: length of the array "found".
- * lags: set of boolean flags parametrizing similarity calculation.
+ * lags: set of boolean flags parameterizing similarity calculation.
  * bounds: whether each trigram is left/right bound of word.
  *
  * Returns word similarity.
@@ -496,13 +476,13 @@ iterate_word_similarity(int *trg2indexes,
 
 	/* Select appropriate threshold */
 	threshold = (flags & WORD_SIMILARITY_STRICT) ?
-				 strict_word_similarity_threshold :
-				 word_similarity_threshold;
+		strict_word_similarity_threshold :
+		word_similarity_threshold;
 
 	/*
-	 * Consider first trigram as initial lower bount for strict word similarity,
-	 * or initialize it later with first trigram present for plain word
-	 * similarity.
+	 * Consider first trigram as initial lower bound for strict word
+	 * similarity, or initialize it later with first trigram present for plain
+	 * word similarity.
 	 */
 	lower = (flags & WORD_SIMILARITY_STRICT) ? 0 : -1;
 
@@ -533,7 +513,7 @@ iterate_word_similarity(int *trg2indexes,
 		 * plain word similarity
 		 */
 		if ((flags & WORD_SIMILARITY_STRICT) ? (bounds[i] & TRGM_BOUND_RIGHT)
-											 : found[trgindex])
+			: found[trgindex])
 		{
 			int			prev_lower,
 						tmp_ulen2,
@@ -597,8 +577,8 @@ iterate_word_similarity(int *trg2indexes,
 			smlr_max = Max(smlr_max, smlr_cur);
 
 			/*
-			 * if we only check that word similarity is greater than
-			 * threshold we do not need to calculate a maximum similarity.
+			 * if we only check that word similarity is greater than threshold
+			 * we do not need to calculate a maximum similarity.
 			 */
 			if ((flags & WORD_SIMILARITY_CHECK_ONLY) && smlr_max >= threshold)
 				break;
@@ -633,7 +613,7 @@ iterate_word_similarity(int *trg2indexes,
  *
  * str1: search pattern string, of length slen1 bytes.
  * str2: text in which we are looking for a word, of length slen2 bytes.
- * flags: set of boolean flags parametrizing similarity calculation.
+ * flags: set of boolean flags parameterizing similarity calculation.
  *
  * Returns word similarity.
  */
@@ -653,7 +633,7 @@ calc_word_similarity(char *str1, int slen1, char *str2, int slen2,
 				ulen1;
 	int		   *trg2indexes;
 	float4		result;
-	TrgmBound	   *bounds;
+	TrgmBound  *bounds;
 
 	protect_out_of_mem(slen1 + slen2);
 
@@ -943,7 +923,7 @@ generate_wildcard_trgm(const char *str, int slen)
 	if (len > 1)
 	{
 		qsort((void *) GETARR(trg), len, sizeof(trgm), comp_trgm);
-		len = unique_array(GETARR(trg), len);
+		len = qunique(GETARR(trg), len, sizeof(trgm), comp_trgm);
 	}
 
 	SET_VARSIZE(trg, CALCGTSIZE(ARRKEY, len));
@@ -995,14 +975,12 @@ show_trgm(PG_FUNCTION_ARGS)
 		d[i] = PointerGetDatum(item);
 	}
 
-	a = construct_array(
-						d,
+	a = construct_array(d,
 						ARRNELEM(trg),
 						TEXTOID,
 						-1,
 						false,
-						'i'
-		);
+						TYPALIGN_INT);
 
 	for (i = 0; i < ARRNELEM(trg); i++)
 		pfree(DatumGetPointer(d[i]));

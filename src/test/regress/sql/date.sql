@@ -263,11 +263,6 @@ SELECT EXTRACT(DECADE FROM DATE '0012-12-31 BC'); --  -2
 -- on a timestamp.
 SELECT EXTRACT(CENTURY FROM NOW())>=21 AS True;       -- true
 SELECT EXTRACT(CENTURY FROM TIMESTAMP '1970-03-20 04:30:00.00000'); -- 20
--- on an interval
-SELECT EXTRACT(CENTURY FROM INTERVAL '100 y');  -- 1
-SELECT EXTRACT(CENTURY FROM INTERVAL '99 y');   -- 0
-SELECT EXTRACT(CENTURY FROM INTERVAL '-99 y');  -- 0
-SELECT EXTRACT(CENTURY FROM INTERVAL '-100 y'); -- -1
 --
 -- test trunc function!
 --
@@ -334,7 +329,6 @@ SELECT EXTRACT(EPOCH      FROM DATE 'infinity');    --  Infinity
 -- wrong fields from non-finite date:
 --
 SELECT EXTRACT(MICROSEC  FROM DATE 'infinity');     -- ERROR:  timestamp units "microsec" not recognized
-SELECT EXTRACT(UNDEFINED FROM DATE 'infinity');     -- ERROR:  timestamp units "undefined" not supported
 
 -- test constructors
 select make_date(2013, 7, 15);

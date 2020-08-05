@@ -25,7 +25,7 @@ ALTER INDEX [ IF EXISTS ] <replaceable class="parameter">name</replaceable> RENA
 ALTER INDEX [ IF EXISTS ] <replaceable class="parameter">name</replaceable> SET TABLESPACE <replaceable class="parameter">tablespace_name</replaceable>
 ALTER INDEX <replaceable class="parameter">name</replaceable> ATTACH PARTITION <replaceable class="parameter">index_name</replaceable>
 ALTER INDEX <replaceable class="parameter">name</replaceable> DEPENDS ON EXTENSION <replaceable class="parameter">extension_name</replaceable>
-ALTER INDEX [ IF EXISTS ] <replaceable class="parameter">name</replaceable> SET ( <replaceable class="parameter">storage_parameter</replaceable> = <replaceable class="parameter">value</replaceable> [, ... ] )
+ALTER INDEX [ IF EXISTS ] <replaceable class="parameter">name</replaceable> SET ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )
 ALTER INDEX [ IF EXISTS ] <replaceable class="parameter">name</replaceable> RESET ( <replaceable class="parameter">storage_parameter</replaceable> [, ... ] )
 ALTER INDEX [ IF EXISTS ] <replaceable class="parameter">name</replaceable> ALTER [ COLUMN ] <replaceable class="parameter">column_number</replaceable>
     SET STATISTICS <replaceable class="parameter">integer</replaceable>
@@ -39,7 +39,10 @@ ALTER INDEX ALL IN TABLESPACE <replaceable class="parameter">name</replaceable> 
 
   <para>
    <command>ALTER INDEX</command> changes the definition of an existing index.
-   There are several subforms:
+   There are several subforms described below. Note that the lock level required
+   may differ for each subform. An <literal>ACCESS EXCLUSIVE</literal> lock is held
+   unless explicitly noted. When multiple subcommands are listed, the lock
+   held will be the strictest one required from any subcommand.
 
   <variablelist>
 
@@ -48,7 +51,14 @@ ALTER INDEX ALL IN TABLESPACE <replaceable class="parameter">name</replaceable> 
     <listitem>
      <para>
       The <literal>RENAME</literal> form changes the name of the index.
+      If the index is associated with a table constraint (either
+      <literal>UNIQUE</literal>, <literal>PRIMARY KEY</literal>,
+      or <literal>EXCLUDE</literal>), the constraint is renamed as well.
       There is no effect on the stored data.
+     </para>
+     <para>
+      Renaming an index acquires a <literal>SHARE UPDATE EXCLUSIVE</literal>
+      lock.
      </para>
     </listitem>
    </varlistentry>
@@ -90,17 +100,20 @@ ALTER INDEX ALL IN TABLESPACE <replaceable class="parameter">name</replaceable> 
    </varlistentry>
 
    <varlistentry>
-    <term><literal>DEPENDS ON EXTENSION</literal></term>
+    <term><literal>DEPENDS ON EXTENSION <replaceable class="parameter">extension_name</replaceable></literal></term>
+    <term><literal>NO DEPENDS ON EXTENSION <replaceable class="parameter">extension_name</replaceable></literal></term>
     <listitem>
      <para>
-      This form marks the index as dependent on the extension, such that if the
-      extension is dropped, the index will automatically be dropped as well.
+      This form marks the index as dependent on the extension, or no longer
+      dependent on that extension if <literal>NO</literal> is specified.
+      An index that's marked as dependent on an extension is automatically
+      dropped when the extension is dropped.
      </para>
     </listitem>
    </varlistentry>
 
    <varlistentry>
-    <term><literal>SET ( <replaceable class="parameter">storage_parameter</replaceable> = <replaceable class="parameter">value</replaceable> [, ... ] )</literal></term>
+    <term><literal>SET ( <replaceable class="parameter">storage_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )</literal></term>
     <listitem>
      <para>
       This form changes one or more index-method-specific storage parameters
@@ -134,7 +147,7 @@ ALTER INDEX ALL IN TABLESPACE <replaceable class="parameter">name</replaceable> 
       subsequent <xref linkend="sql-analyze"/> operations, though can
       be used only on index columns that are defined as an expression.
       Since expressions lack a unique name, we refer to them using the
-      ordinal number of the index column. 
+      ordinal number of the index column.
       The target can be set in the range 0 to 10000; alternatively, set it
       to -1 to revert to using the system default statistics
       target (<xref linkend="guc-default-statistics-target"/>).
@@ -285,8 +298,7 @@ REINDEX INDEX distributors;
 <programlisting>
 CREATE INDEX coord_idx ON measured (x, y, (z + t));
 ALTER INDEX coord_idx ALTER COLUMN 3 SET STATISTICS 1000;
-</programlisting>
-  </para>
+</programlisting></para>
 
  </refsect1>
 

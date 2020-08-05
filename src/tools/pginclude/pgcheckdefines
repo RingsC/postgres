@@ -1,4 +1,4 @@
-#! /usr/bin/perl -w
+#! /usr/bin/perl
 
 #
 # This script looks for symbols that are referenced in #ifdef or defined()
@@ -21,6 +21,7 @@
 #
 
 use strict;
+use warnings;
 
 use Cwd;
 use File::Basename;
@@ -58,7 +59,7 @@ while (<$pipe>)
 	chomp;
 	push @hfiles, $_
 	  unless m|^src/include/port/|
-		  || m|^src/backend/port/\w+/|;
+	  || m|^src/backend/port/\w+/|;
 }
 close $pipe or die "$FIND failed: $!";
 
@@ -119,7 +120,7 @@ foreach my $file (@hfiles, @cfiles)
 			$top_builddir = $top_builddir . "/..";
 		}
 		$MAKECMD =
-"$MAKE -qp 'subdir=$subdir' 'top_builddir=$top_builddir' -f '$top_builddir/src/Makefile.global'";
+		  "$MAKE -qp 'subdir=$subdir' 'top_builddir=$top_builddir' -f '$top_builddir/src/Makefile.global'";
 	}
 
 	my ($CPPFLAGS, $CFLAGS, $CFLAGS_SL, $PTHREAD_CFLAGS, $CC);
@@ -297,4 +298,6 @@ sub checkit
 	print "$file references $symbol, defined in @places\n";
 
 	# print "includes: @includes\n";
+
+	return;
 }

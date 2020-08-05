@@ -5,7 +5,7 @@
  *
  * See logtape.c for explanations.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/logtape.h
@@ -44,13 +44,10 @@ typedef struct LogicalTapeSet LogicalTapeSet;
 typedef struct TapeShare
 {
 	/*
-	 * firstblocknumber is first block that should be read from materialized
-	 * tape.
-	 *
-	 * buffilesize is the size of associated BufFile following freezing.
+	 * Currently, all the leader process needs is the location of the
+	 * materialized tape's first block.
 	 */
 	long		firstblocknumber;
-	off_t		buffilesize;
 } TapeShare;
 
 /*
@@ -58,24 +55,25 @@ typedef struct TapeShare
  */
 
 extern LogicalTapeSet *LogicalTapeSetCreate(int ntapes, TapeShare *shared,
-					 SharedFileSet *fileset, int worker);
+											SharedFileSet *fileset, int worker);
 extern void LogicalTapeSetClose(LogicalTapeSet *lts);
 extern void LogicalTapeSetForgetFreeSpace(LogicalTapeSet *lts);
 extern size_t LogicalTapeRead(LogicalTapeSet *lts, int tapenum,
-				void *ptr, size_t size);
+							  void *ptr, size_t size);
 extern void LogicalTapeWrite(LogicalTapeSet *lts, int tapenum,
-				 void *ptr, size_t size);
+							 void *ptr, size_t size);
 extern void LogicalTapeRewindForRead(LogicalTapeSet *lts, int tapenum,
-						 size_t buffer_size);
+									 size_t buffer_size);
 extern void LogicalTapeRewindForWrite(LogicalTapeSet *lts, int tapenum);
 extern void LogicalTapeFreeze(LogicalTapeSet *lts, int tapenum,
-				  TapeShare *share);
+							  TapeShare *share);
+extern void LogicalTapeSetExtend(LogicalTapeSet *lts, int nAdditional);
 extern size_t LogicalTapeBackspace(LogicalTapeSet *lts, int tapenum,
-					 size_t size);
+								   size_t size);
 extern void LogicalTapeSeek(LogicalTapeSet *lts, int tapenum,
-				long blocknum, int offset);
+							long blocknum, int offset);
 extern void LogicalTapeTell(LogicalTapeSet *lts, int tapenum,
-				long *blocknum, int *offset);
+							long *blocknum, int *offset);
 extern long LogicalTapeSetBlocks(LogicalTapeSet *lts);
 
 #endif							/* LOGTAPE_H */

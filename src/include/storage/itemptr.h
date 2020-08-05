@@ -4,7 +4,7 @@
  *	  POSTGRES disk item pointer definitions.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/itemptr.h
@@ -22,8 +22,8 @@
  *
  * This is a pointer to an item within a disk page of a known file
  * (for example, a cross-link from an index to its parent table).
- * blkid tells us which block, posid tells us which entry in the linp
- * (ItemIdData) array we want.
+ * ip_blkid tells us which block, ip_posid tells us which entry in
+ * the linp (ItemIdData) array we want.
  *
  * Note: because there is an item pointer in each tuple header and index
  * tuple header on disk, it's very important not to waste space with
@@ -41,12 +41,34 @@ typedef struct ItemPointerData
 
 /* If compiler understands packed and aligned pragmas, use those */
 #if defined(pg_attribute_packed) && defined(pg_attribute_aligned)
-pg_attribute_packed()
-pg_attribute_aligned(2)
+			pg_attribute_packed()
+			pg_attribute_aligned(2)
 #endif
 ItemPointerData;
 
 typedef ItemPointerData *ItemPointer;
+
+/* ----------------
+ *		special values used in heap tuples (t_ctid)
+ * ----------------
+ */
+
+/*
+ * If a heap tuple holds a speculative insertion token rather than a real
+ * TID, ip_posid is set to SpecTokenOffsetNumber, and the token is stored in
+ * ip_blkid. SpecTokenOffsetNumber must be higher than MaxOffsetNumber, so
+ * that it can be distinguished from a valid offset number in a regular item
+ * pointer.
+ */
+#define SpecTokenOffsetNumber		0xfffe
+
+/*
+ * When a tuple is moved to a different partition by UPDATE, the t_ctid of
+ * the old tuple version is set to this magic value.
+ */
+#define MovedPartitionsOffsetNumber 0xfffd
+#define MovedPartitionsBlockNumber	InvalidBlockNumber
+
 
 /* ----------------
  *		support macros
@@ -160,7 +182,10 @@ typedef ItemPointerData *ItemPointer;
  *		partition.
  */
 #define ItemPointerIndicatesMovedPartitions(pointer) \
-	!BlockNumberIsValid(ItemPointerGetBlockNumberNoCheck(pointer))
+( \
+	ItemPointerGetOffsetNumber(pointer) == MovedPartitionsOffsetNumber && \
+	ItemPointerGetBlockNumberNoCheck(pointer) == MovedPartitionsBlockNumber \
+)
 
 /*
  * ItemPointerSetMovedPartitions
@@ -168,7 +193,7 @@ typedef ItemPointerData *ItemPointer;
  *		different partition.
  */
 #define ItemPointerSetMovedPartitions(pointer) \
-	ItemPointerSetBlockNumber((pointer), InvalidBlockNumber)
+	ItemPointerSet((pointer), MovedPartitionsBlockNumber, MovedPartitionsOffsetNumber)
 
 /* ----------------
  *		externs

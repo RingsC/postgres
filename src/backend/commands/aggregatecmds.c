@@ -4,7 +4,7 @@
  *
  *	  Routines for aggregate-manipulation commands
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -54,7 +54,12 @@ static char extractModify(DefElem *defel);
  * "parameters" is a list of DefElem representing the agg's definition clauses.
  */
 ObjectAddress
-DefineAggregate(ParseState *pstate, List *name, List *args, bool oldstyle, List *parameters)
+DefineAggregate(ParseState *pstate,
+				List *name,
+				List *args,
+				bool oldstyle,
+				List *parameters,
+				bool replace)
 {
 	char	   *aggName;
 	Oid			aggNamespace;
@@ -436,6 +441,7 @@ DefineAggregate(ParseState *pstate, List *name, List *args, bool oldstyle, List 
 	 */
 	return AggregateCreate(aggName, /* aggregate name */
 						   aggNamespace,	/* namespace */
+						   replace,
 						   aggKind,
 						   numArgs,
 						   numDirectArgs,
@@ -477,13 +483,13 @@ extractModify(DefElem *defel)
 
 	if (strcmp(val, "read_only") == 0)
 		return AGGMODIFY_READ_ONLY;
-	if (strcmp(val, "sharable") == 0)
-		return AGGMODIFY_SHARABLE;
+	if (strcmp(val, "shareable") == 0)
+		return AGGMODIFY_SHAREABLE;
 	if (strcmp(val, "read_write") == 0)
 		return AGGMODIFY_READ_WRITE;
 	ereport(ERROR,
 			(errcode(ERRCODE_SYNTAX_ERROR),
-			 errmsg("parameter \"%s\" must be READ_ONLY, SHARABLE, or READ_WRITE",
+			 errmsg("parameter \"%s\" must be READ_ONLY, SHAREABLE, or READ_WRITE",
 					defel->defname)));
 	return 0;					/* keep compiler quiet */
 }

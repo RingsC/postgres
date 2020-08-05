@@ -23,14 +23,15 @@
  * permanently allows caching pointers to them in long-lived places.
  *
  * We have some provisions for updating cache entries if the stored data
- * becomes obsolete.  Information dependent on opclasses is cleared if we
- * detect updates to pg_opclass.  We also support clearing the tuple
- * descriptor and operator/function parts of a rowtype's cache entry,
- * since those may need to change as a consequence of ALTER TABLE.
- * Domain constraint changes are also tracked properly.
+ * becomes obsolete.  Core data extracted from the pg_type row is updated
+ * when we detect updates to pg_type.  Information dependent on opclasses is
+ * cleared if we detect updates to pg_opclass.  We also support clearing the
+ * tuple descriptor and operator/function parts of a rowtype's cache entry,
+ * since those may need to change as a consequence of ALTER TABLE.  Domain
+ * constraint changes are also tracked properly.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -43,11 +44,12 @@
 #include <limits.h>
 
 #include "access/hash.h"
-#include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/nbtree.h"
 #include "access/parallel.h"
+#include "access/relation.h"
 #include "access/session.h"
+#include "access/table.h"
 #include "catalog/indexing.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_constraint.h"
@@ -58,7 +60,7 @@
 #include "commands/defrem.h"
 #include "executor/executor.h"
 #include "lib/dshash.h"
-#include "optimizer/planner.h"
+#include "optimizer/optimizer.h"
 #include "storage/lwlock.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
@@ -79,24 +81,31 @@ static HTAB *TypeCacheHash = NULL;
 static TypeCacheEntry *firstDomainTypeEntry = NULL;
 
 /* Private flag bits in the TypeCacheEntry.flags field */
-#define TCFLAGS_CHECKED_BTREE_OPCLASS		0x000001
-#define TCFLAGS_CHECKED_HASH_OPCLASS		0x000002
-#define TCFLAGS_CHECKED_EQ_OPR				0x000004
-#define TCFLAGS_CHECKED_LT_OPR				0x000008
-#define TCFLAGS_CHECKED_GT_OPR				0x000010
-#define TCFLAGS_CHECKED_CMP_PROC			0x000020
-#define TCFLAGS_CHECKED_HASH_PROC			0x000040
-#define TCFLAGS_CHECKED_HASH_EXTENDED_PROC	0x000080
-#define TCFLAGS_CHECKED_ELEM_PROPERTIES		0x000100
-#define TCFLAGS_HAVE_ELEM_EQUALITY			0x000200
-#define TCFLAGS_HAVE_ELEM_COMPARE			0x000400
-#define TCFLAGS_HAVE_ELEM_HASHING			0x000800
-#define TCFLAGS_HAVE_ELEM_EXTENDED_HASHING	0x001000
-#define TCFLAGS_CHECKED_FIELD_PROPERTIES	0x002000
-#define TCFLAGS_HAVE_FIELD_EQUALITY			0x004000
-#define TCFLAGS_HAVE_FIELD_COMPARE			0x008000
-#define TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS	0x010000
-#define TCFLAGS_DOMAIN_BASE_IS_COMPOSITE	0x020000
+#define TCFLAGS_HAVE_PG_TYPE_DATA			0x000001
+#define TCFLAGS_CHECKED_BTREE_OPCLASS		0x000002
+#define TCFLAGS_CHECKED_HASH_OPCLASS		0x000004
+#define TCFLAGS_CHECKED_EQ_OPR				0x000008
+#define TCFLAGS_CHECKED_LT_OPR				0x000010
+#define TCFLAGS_CHECKED_GT_OPR				0x000020
+#define TCFLAGS_CHECKED_CMP_PROC			0x000040
+#define TCFLAGS_CHECKED_HASH_PROC			0x000080
+#define TCFLAGS_CHECKED_HASH_EXTENDED_PROC	0x000100
+#define TCFLAGS_CHECKED_ELEM_PROPERTIES		0x000200
+#define TCFLAGS_HAVE_ELEM_EQUALITY			0x000400
+#define TCFLAGS_HAVE_ELEM_COMPARE			0x000800
+#define TCFLAGS_HAVE_ELEM_HASHING			0x001000
+#define TCFLAGS_HAVE_ELEM_EXTENDED_HASHING	0x002000
+#define TCFLAGS_CHECKED_FIELD_PROPERTIES	0x004000
+#define TCFLAGS_HAVE_FIELD_EQUALITY			0x008000
+#define TCFLAGS_HAVE_FIELD_COMPARE			0x010000
+#define TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS	0x020000
+#define TCFLAGS_DOMAIN_BASE_IS_COMPOSITE	0x040000
+
+/* The flags associated with equality/comparison/hashing are all but these: */
+#define TCFLAGS_OPERATOR_FLAGS \
+	(~(TCFLAGS_HAVE_PG_TYPE_DATA | \
+	   TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS | \
+	   TCFLAGS_DOMAIN_BASE_IS_COMPOSITE))
 
 /*
  * Data stored about a domain type's constraints.  Note that we do not create
@@ -150,7 +159,7 @@ typedef struct RecordCacheEntry
 
 /*
  * To deal with non-anonymous record types that are exchanged by backends
- * involved in a parallel query, we also need a shared verion of the above.
+ * involved in a parallel query, we also need a shared version of the above.
  */
 struct SharedRecordTypmodRegistry
 {
@@ -247,7 +256,7 @@ static const dshash_parameters srtr_record_table_params = {
 	sizeof(SharedRecordTableEntry),
 	shared_record_table_compare,
 	shared_record_table_hash,
-	LWTRANCHE_SESSION_RECORD_TABLE
+	LWTRANCHE_PER_SESSION_RECORD_TYPE
 };
 
 /* Parameters for SharedRecordTypmodRegistry's typmod hash table. */
@@ -256,7 +265,7 @@ static const dshash_parameters srtr_typmod_table_params = {
 	sizeof(SharedTypmodTableEntry),
 	dshash_memcmp,
 	dshash_memhash,
-	LWTRANCHE_SESSION_TYPMOD_TABLE
+	LWTRANCHE_PER_SESSION_RECORD_TYPMOD
 };
 
 /* hashtable for recognizing registered record types */
@@ -294,16 +303,17 @@ static bool range_element_has_hashing(TypeCacheEntry *typentry);
 static bool range_element_has_extended_hashing(TypeCacheEntry *typentry);
 static void cache_range_element_properties(TypeCacheEntry *typentry);
 static void TypeCacheRelCallback(Datum arg, Oid relid);
+static void TypeCacheTypCallback(Datum arg, int cacheid, uint32 hashvalue);
 static void TypeCacheOpcCallback(Datum arg, int cacheid, uint32 hashvalue);
 static void TypeCacheConstrCallback(Datum arg, int cacheid, uint32 hashvalue);
 static void load_enum_cache_data(TypeCacheEntry *tcache);
 static EnumItem *find_enumitem(TypeCacheEnumData *enumdata, Oid arg);
 static int	enum_oid_cmp(const void *left, const void *right);
 static void shared_record_typmod_registry_detach(dsm_segment *segment,
-									 Datum datum);
+												 Datum datum);
 static TupleDesc find_or_make_matching_shared_tupledesc(TupleDesc tupdesc);
 static dsa_pointer share_tupledesc(dsa_area *area, TupleDesc tupdesc,
-				uint32 typmod);
+								   uint32 typmod);
 
 
 /*
@@ -336,9 +346,9 @@ lookup_type_cache(Oid type_id, int flags)
 
 		/* Also set up callbacks for SI invalidations */
 		CacheRegisterRelcacheCallback(TypeCacheRelCallback, (Datum) 0);
+		CacheRegisterSyscacheCallback(TYPEOID, TypeCacheTypCallback, (Datum) 0);
 		CacheRegisterSyscacheCallback(CLAOID, TypeCacheOpcCallback, (Datum) 0);
 		CacheRegisterSyscacheCallback(CONSTROID, TypeCacheConstrCallback, (Datum) 0);
-		CacheRegisterSyscacheCallback(TYPEOID, TypeCacheConstrCallback, (Datum) 0);
 
 		/* Also make sure CacheMemoryContext exists */
 		if (!CacheMemoryContext)
@@ -380,7 +390,13 @@ lookup_type_cache(Oid type_id, int flags)
 		Assert(!found);			/* it wasn't there a moment ago */
 
 		MemSet(typentry, 0, sizeof(TypeCacheEntry));
+
+		/* These fields can never change, by definition */
 		typentry->type_id = type_id;
+		typentry->type_id_hash = GetSysCacheHashValue1(TYPEOID,
+													   ObjectIdGetDatum(type_id));
+
+		/* Keep this part in sync with the code below */
 		typentry->typlen = typtup->typlen;
 		typentry->typbyval = typtup->typbyval;
 		typentry->typalign = typtup->typalign;
@@ -388,6 +404,8 @@ lookup_type_cache(Oid type_id, int flags)
 		typentry->typtype = typtup->typtype;
 		typentry->typrelid = typtup->typrelid;
 		typentry->typelem = typtup->typelem;
+		typentry->typcollation = typtup->typcollation;
+		typentry->flags |= TCFLAGS_HAVE_PG_TYPE_DATA;
 
 		/* If it's a domain, immediately thread it into the domain cache list */
 		if (typentry->typtype == TYPTYPE_DOMAIN)
@@ -395,6 +413,43 @@ lookup_type_cache(Oid type_id, int flags)
 			typentry->nextDomain = firstDomainTypeEntry;
 			firstDomainTypeEntry = typentry;
 		}
+
+		ReleaseSysCache(tp);
+	}
+	else if (!(typentry->flags & TCFLAGS_HAVE_PG_TYPE_DATA))
+	{
+		/*
+		 * We have an entry, but its pg_type row got changed, so reload the
+		 * data obtained directly from pg_type.
+		 */
+		HeapTuple	tp;
+		Form_pg_type typtup;
+
+		tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_id));
+		if (!HeapTupleIsValid(tp))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("type with OID %u does not exist", type_id)));
+		typtup = (Form_pg_type) GETSTRUCT(tp);
+		if (!typtup->typisdefined)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_OBJECT),
+					 errmsg("type \"%s\" is only a shell",
+							NameStr(typtup->typname))));
+
+		/*
+		 * Keep this part in sync with the code above.  Many of these fields
+		 * shouldn't ever change, particularly typtype, but copy 'em anyway.
+		 */
+		typentry->typlen = typtup->typlen;
+		typentry->typbyval = typtup->typbyval;
+		typentry->typalign = typtup->typalign;
+		typentry->typstorage = typtup->typstorage;
+		typentry->typtype = typtup->typtype;
+		typentry->typrelid = typtup->typrelid;
+		typentry->typelem = typtup->typelem;
+		typentry->typcollation = typtup->typcollation;
+		typentry->flags |= TCFLAGS_HAVE_PG_TYPE_DATA;
 
 		ReleaseSysCache(tp);
 	}
@@ -748,12 +803,17 @@ lookup_type_cache(Oid type_id, int flags)
 
 	/*
 	 * If requested, get information about a range type
+	 *
+	 * This includes making sure that the basic info about the range element
+	 * type is up-to-date.
 	 */
 	if ((flags & TYPECACHE_RANGE_INFO) &&
-		typentry->rngelemtype == NULL &&
 		typentry->typtype == TYPTYPE_RANGE)
 	{
-		load_rangetype_info(typentry);
+		if (typentry->rngelemtype == NULL)
+			load_rangetype_info(typentry);
+		else if (!(typentry->rngelemtype->flags & TCFLAGS_HAVE_PG_TYPE_DATA))
+			(void) lookup_type_cache(typentry->rngelemtype->type_id, 0);
 	}
 
 	/*
@@ -913,7 +973,7 @@ load_domaintype_info(TypeCacheEntry *typentry)
 	 * constraints for not just this domain, but any ancestor domains, so the
 	 * outer loop crawls up the domain stack.
 	 */
-	conRel = heap_open(ConstraintRelationId, AccessShareLock);
+	conRel = table_open(ConstraintRelationId, AccessShareLock);
 
 	for (;;)
 	{
@@ -992,7 +1052,16 @@ load_domaintype_info(TypeCacheEntry *typentry)
 
 			check_expr = (Expr *) stringToNode(constring);
 
-			/* ExecInitExpr will assume we've planned the expression */
+			/*
+			 * Plan the expression, since ExecInitExpr will expect that.
+			 *
+			 * Note: caching the result of expression_planner() is not very
+			 * good practice.  Ideally we'd use a CachedExpression here so
+			 * that we would react promptly to, eg, changes in inlined
+			 * functions.  However, because we don't support mutable domain
+			 * CHECK constraints, it's not really clear that it's worth the
+			 * extra overhead to do that.
+			 */
 			check_expr = expression_planner(check_expr);
 
 			r = makeNode(DomainConstraintState);
@@ -1045,7 +1114,7 @@ load_domaintype_info(TypeCacheEntry *typentry)
 		ReleaseSysCache(tup);
 	}
 
-	heap_close(conRel, AccessShareLock);
+	table_close(conRel, AccessShareLock);
 
 	/*
 	 * Only need to add one NOT NULL check regardless of how many domains in
@@ -1869,7 +1938,7 @@ assign_record_type_identifier(Oid type_id, int32 typmod)
 }
 
 /*
- * Return the amout of shmem required to hold a SharedRecordTypmodRegistry.
+ * Return the amount of shmem required to hold a SharedRecordTypmodRegistry.
  * This exists only to avoid exposing private innards of
  * SharedRecordTypmodRegistry in a header.
  */
@@ -2105,10 +2174,20 @@ TypeCacheRelCallback(Datum arg, Oid relid)
 				if (--typentry->tupDesc->tdrefcount == 0)
 					FreeTupleDesc(typentry->tupDesc);
 				typentry->tupDesc = NULL;
+
+				/*
+				 * Also clear tupDesc_identifier, so that anything watching
+				 * that will realize that the tupdesc has possibly changed.
+				 * (Alternatively, we could specify that to detect possible
+				 * tupdesc change, one must check for tupDesc != NULL as well
+				 * as tupDesc_identifier being the same as what was previously
+				 * seen.  That seems error-prone.)
+				 */
+				typentry->tupDesc_identifier = 0;
 			}
 
 			/* Reset equality/comparison/hashing validity information */
-			typentry->flags = 0;
+			typentry->flags &= ~TCFLAGS_OPERATOR_FLAGS;
 		}
 		else if (typentry->typtype == TYPTYPE_DOMAIN)
 		{
@@ -2119,7 +2198,39 @@ TypeCacheRelCallback(Datum arg, Oid relid)
 			 * type is composite, we don't need to reset anything.
 			 */
 			if (typentry->flags & TCFLAGS_DOMAIN_BASE_IS_COMPOSITE)
-				typentry->flags = 0;
+				typentry->flags &= ~TCFLAGS_OPERATOR_FLAGS;
+		}
+	}
+}
+
+/*
+ * TypeCacheTypCallback
+ *		Syscache inval callback function
+ *
+ * This is called when a syscache invalidation event occurs for any
+ * pg_type row.  If we have information cached about that type, mark
+ * it as needing to be reloaded.
+ */
+static void
+TypeCacheTypCallback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	HASH_SEQ_STATUS status;
+	TypeCacheEntry *typentry;
+
+	/* TypeCacheHash must exist, else this callback wouldn't be registered */
+	hash_seq_init(&status, TypeCacheHash);
+	while ((typentry = (TypeCacheEntry *) hash_seq_search(&status)) != NULL)
+	{
+		/* Is this the targeted type row (or it's a total cache flush)? */
+		if (hashvalue == 0 || typentry->type_id_hash == hashvalue)
+		{
+			/*
+			 * Mark the data obtained directly from pg_type as invalid.  Also,
+			 * if it's a domain, typnotnull might've changed, so we'll need to
+			 * recalculate its constraints.
+			 */
+			typentry->flags &= ~(TCFLAGS_HAVE_PG_TYPE_DATA |
+								 TCFLAGS_CHECKED_DOMAIN_CONSTRAINTS);
 		}
 	}
 }
@@ -2151,7 +2262,7 @@ TypeCacheOpcCallback(Datum arg, int cacheid, uint32 hashvalue)
 	while ((typentry = (TypeCacheEntry *) hash_seq_search(&status)) != NULL)
 	{
 		/* Reset equality/comparison/hashing validity information */
-		typentry->flags = 0;
+		typentry->flags &= ~TCFLAGS_OPERATOR_FLAGS;
 	}
 }
 
@@ -2160,12 +2271,12 @@ TypeCacheOpcCallback(Datum arg, int cacheid, uint32 hashvalue)
  *		Syscache inval callback function
  *
  * This is called when a syscache invalidation event occurs for any
- * pg_constraint or pg_type row.  We flush information about domain
- * constraints when this happens.
+ * pg_constraint row.  We flush information about domain constraints
+ * when this happens.
  *
- * It's slightly annoying that we can't tell whether the inval event was for a
- * domain constraint/type record or not; there's usually more update traffic
- * for table constraints/types than domain constraints, so we'll do a lot of
+ * It's slightly annoying that we can't tell whether the inval event was for
+ * a domain constraint record or not; there's usually more update traffic
+ * for table constraints than domain constraints, so we'll do a lot of
  * useless flushes.  Still, this is better than the old no-caching-at-all
  * approach to domain constraints.
  */
@@ -2336,7 +2447,7 @@ load_enum_cache_data(TypeCacheEntry *tcache)
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(tcache->type_id));
 
-	enum_rel = heap_open(EnumRelationId, AccessShareLock);
+	enum_rel = table_open(EnumRelationId, AccessShareLock);
 	enum_scan = systable_beginscan(enum_rel,
 								   EnumTypIdLabelIndexId,
 								   true, NULL,
@@ -2351,13 +2462,13 @@ load_enum_cache_data(TypeCacheEntry *tcache)
 			maxitems *= 2;
 			items = (EnumItem *) repalloc(items, sizeof(EnumItem) * maxitems);
 		}
-		items[numitems].enum_oid = HeapTupleGetOid(enum_tuple);
+		items[numitems].enum_oid = en->oid;
 		items[numitems].sort_order = en->enumsortorder;
 		numitems++;
 	}
 
 	systable_endscan(enum_scan);
-	heap_close(enum_rel, AccessShareLock);
+	table_close(enum_rel, AccessShareLock);
 
 	/* Sort the items into OID order */
 	qsort(items, numitems, sizeof(EnumItem), enum_oid_cmp);

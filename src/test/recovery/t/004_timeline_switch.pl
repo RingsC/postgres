@@ -6,49 +6,53 @@ use warnings;
 use File::Path qw(rmtree);
 use PostgresNode;
 use TestLib;
-use Test::More tests => 1;
+use Test::More tests => 2;
 
 $ENV{PGDATABASE} = 'postgres';
 
-# Initialize master node
-my $node_master = get_new_node('master');
-$node_master->init(allows_streaming => 1);
-$node_master->start;
+# Initialize primary node
+my $node_primary = get_new_node('primary');
+$node_primary->init(allows_streaming => 1);
+$node_primary->start;
 
 # Take backup
 my $backup_name = 'my_backup';
-$node_master->backup($backup_name);
+$node_primary->backup($backup_name);
 
 # Create two standbys linking to it
 my $node_standby_1 = get_new_node('standby_1');
-$node_standby_1->init_from_backup($node_master, $backup_name,
+$node_standby_1->init_from_backup($node_primary, $backup_name,
 	has_streaming => 1);
 $node_standby_1->start;
 my $node_standby_2 = get_new_node('standby_2');
-$node_standby_2->init_from_backup($node_master, $backup_name,
+$node_standby_2->init_from_backup($node_primary, $backup_name,
 	has_streaming => 1);
 $node_standby_2->start;
 
-# Create some content on master
-$node_master->safe_psql('postgres',
+# Create some content on primary
+$node_primary->safe_psql('postgres',
 	"CREATE TABLE tab_int AS SELECT generate_series(1,1000) AS a");
 
 # Wait until standby has replayed enough data on standby 1
-$node_master->wait_for_catchup($node_standby_1, 'replay',
-	$node_master->lsn('write'));
+$node_primary->wait_for_catchup($node_standby_1, 'replay',
+	$node_primary->lsn('write'));
 
-# Stop and remove master, and promote standby 1, switching it to a new timeline
-$node_master->teardown_node;
-$node_standby_1->promote;
+# Stop and remove primary
+$node_primary->teardown_node;
+
+# promote standby 1 using "pg_promote", switching it to a new timeline
+my $psql_out = '';
+$node_standby_1->psql(
+	'postgres',
+	"SELECT pg_promote(wait_seconds => 300)",
+	stdout => \$psql_out);
+is($psql_out, 't', "promotion of standby with pg_promote");
 
 # Switch standby 2 to replay from standby 1
-rmtree($node_standby_2->data_dir . '/recovery.conf');
 my $connstr_1 = $node_standby_1->connstr;
 $node_standby_2->append_conf(
-	'recovery.conf', qq(
-primary_conninfo='$connstr_1 application_name=@{[$node_standby_2->name]}'
-standby_mode=on
-recovery_target_timeline='latest'
+	'postgresql.conf', qq(
+primary_conninfo='$connstr_1'
 ));
 $node_standby_2->restart;
 

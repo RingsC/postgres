@@ -3,7 +3,7 @@
  * rowtypes.c
  *	  I/O and comparison functions for generic composite types.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -16,13 +16,14 @@
 
 #include <ctype.h>
 
+#include "access/detoast.h"
 #include "access/htup_details.h"
-#include "access/tuptoaster.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
@@ -550,13 +551,33 @@ record_recv(PG_FUNCTION_ARGS)
 			continue;
 		}
 
-		/* Verify column datatype */
+		/* Check column type recorded in the data */
 		coltypoid = pq_getmsgint(buf, sizeof(Oid));
-		if (coltypoid != column_type)
+
+		/*
+		 * From a security standpoint, it doesn't matter whether the input's
+		 * column type matches what we expect: the column type's receive
+		 * function has to be robust enough to cope with invalid data.
+		 * However, from a user-friendliness standpoint, it's nicer to
+		 * complain about type mismatches than to throw "improper binary
+		 * format" errors.  But there's a problem: only built-in types have
+		 * OIDs that are stable enough to believe that a mismatch is a real
+		 * issue.  So complain only if both OIDs are in the built-in range.
+		 * Otherwise, carry on with the column type we "should" be getting.
+		 */
+		if (coltypoid != column_type &&
+			coltypoid < FirstGenbkiObjectId &&
+			column_type < FirstGenbkiObjectId)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("wrong data type: %u, expected %u",
-							coltypoid, column_type)));
+					 errmsg("binary data has type %u (%s) instead of expected %u (%s) in record column %d",
+							coltypoid,
+							format_type_extended(coltypoid, -1,
+												 FORMAT_TYPE_ALLOW_INVALID),
+							column_type,
+							format_type_extended(column_type, -1,
+												 FORMAT_TYPE_ALLOW_INVALID),
+							i + 1)));
 
 		/* Get and check the item length */
 		itemlen = pq_getmsgint(buf, 4);
@@ -942,7 +963,7 @@ record_cmp(FunctionCallInfo fcinfo)
 		 */
 		if (!nulls1[i1] || !nulls2[i2])
 		{
-			FunctionCallInfoData locfcinfo;
+			LOCAL_FCINFO(locfcinfo, 2);
 			int32		cmpresult;
 
 			if (nulls1[i1])
@@ -959,14 +980,16 @@ record_cmp(FunctionCallInfo fcinfo)
 			}
 
 			/* Compare the pair of elements */
-			InitFunctionCallInfoData(locfcinfo, &typentry->cmp_proc_finfo, 2,
+			InitFunctionCallInfoData(*locfcinfo, &typentry->cmp_proc_finfo, 2,
 									 collation, NULL, NULL);
-			locfcinfo.arg[0] = values1[i1];
-			locfcinfo.arg[1] = values2[i2];
-			locfcinfo.argnull[0] = false;
-			locfcinfo.argnull[1] = false;
-			locfcinfo.isnull = false;
-			cmpresult = DatumGetInt32(FunctionCallInvoke(&locfcinfo));
+			locfcinfo->args[0].value = values1[i1];
+			locfcinfo->args[0].isnull = false;
+			locfcinfo->args[1].value = values2[i2];
+			locfcinfo->args[1].isnull = false;
+			cmpresult = DatumGetInt32(FunctionCallInvoke(locfcinfo));
+
+			/* We don't expect comparison support functions to return null */
+			Assert(!locfcinfo->isnull);
 
 			if (cmpresult < 0)
 			{
@@ -1119,11 +1142,11 @@ record_eq(PG_FUNCTION_ARGS)
 	i1 = i2 = j = 0;
 	while (i1 < ncolumns1 || i2 < ncolumns2)
 	{
+		LOCAL_FCINFO(locfcinfo, 2);
 		Form_pg_attribute att1;
 		Form_pg_attribute att2;
 		TypeCacheEntry *typentry;
 		Oid			collation;
-		FunctionCallInfoData locfcinfo;
 		bool		oprresult;
 
 		/*
@@ -1193,15 +1216,14 @@ record_eq(PG_FUNCTION_ARGS)
 			}
 
 			/* Compare the pair of elements */
-			InitFunctionCallInfoData(locfcinfo, &typentry->eq_opr_finfo, 2,
+			InitFunctionCallInfoData(*locfcinfo, &typentry->eq_opr_finfo, 2,
 									 collation, NULL, NULL);
-			locfcinfo.arg[0] = values1[i1];
-			locfcinfo.arg[1] = values2[i2];
-			locfcinfo.argnull[0] = false;
-			locfcinfo.argnull[1] = false;
-			locfcinfo.isnull = false;
-			oprresult = DatumGetBool(FunctionCallInvoke(&locfcinfo));
-			if (!oprresult)
+			locfcinfo->args[0].value = values1[i1];
+			locfcinfo->args[0].isnull = false;
+			locfcinfo->args[1].value = values2[i2];
+			locfcinfo->args[1].isnull = false;
+			oprresult = DatumGetBool(FunctionCallInvoke(locfcinfo));
+			if (locfcinfo->isnull || !oprresult)
 			{
 				result = false;
 				break;
@@ -1442,7 +1464,18 @@ record_image_cmp(FunctionCallInfo fcinfo)
 			}
 
 			/* Compare the pair of elements */
-			if (att1->attlen == -1)
+			if (att1->attbyval)
+			{
+				if (values1[i1] != values2[i2])
+					cmpresult = (values1[i1] < values2[i2]) ? -1 : 1;
+			}
+			else if (att1->attlen > 0)
+			{
+				cmpresult = memcmp(DatumGetPointer(values1[i1]),
+								   DatumGetPointer(values2[i2]),
+								   att1->attlen);
+			}
+			else if (att1->attlen == -1)
 			{
 				Size		len1,
 							len2;
@@ -1465,17 +1498,8 @@ record_image_cmp(FunctionCallInfo fcinfo)
 				if ((Pointer) arg2val != (Pointer) values2[i2])
 					pfree(arg2val);
 			}
-			else if (att1->attbyval)
-			{
-				if (values1[i1] != values2[i2])
-					cmpresult = (values1[i1] < values2[i2]) ? -1 : 1;
-			}
 			else
-			{
-				cmpresult = memcmp(DatumGetPointer(values1[i1]),
-								   DatumGetPointer(values2[i2]),
-								   att1->attlen);
-			}
+				elog(ERROR, "unexpected attlen: %d", att1->attlen);
 
 			if (cmpresult < 0)
 			{
@@ -1671,45 +1695,7 @@ record_image_eq(PG_FUNCTION_ARGS)
 			}
 
 			/* Compare the pair of elements */
-			if (att1->attlen == -1)
-			{
-				Size		len1,
-							len2;
-
-				len1 = toast_raw_datum_size(values1[i1]);
-				len2 = toast_raw_datum_size(values2[i2]);
-				/* No need to de-toast if lengths don't match. */
-				if (len1 != len2)
-					result = false;
-				else
-				{
-					struct varlena *arg1val;
-					struct varlena *arg2val;
-
-					arg1val = PG_DETOAST_DATUM_PACKED(values1[i1]);
-					arg2val = PG_DETOAST_DATUM_PACKED(values2[i2]);
-
-					result = (memcmp(VARDATA_ANY(arg1val),
-									 VARDATA_ANY(arg2val),
-									 len1 - VARHDRSZ) == 0);
-
-					/* Only free memory if it's a copy made here. */
-					if ((Pointer) arg1val != (Pointer) values1[i1])
-						pfree(arg1val);
-					if ((Pointer) arg2val != (Pointer) values2[i2])
-						pfree(arg2val);
-				}
-			}
-			else if (att1->attbyval)
-			{
-				result = (values1[i1] == values2[i2]);
-			}
-			else
-			{
-				result = (memcmp(DatumGetPointer(values1[i1]),
-								 DatumGetPointer(values2[i2]),
-								 att1->attlen) == 0);
-			}
+			result = datum_image_eq(values1[i1], values2[i2], att1->attbyval, att2->attlen);
 			if (!result)
 				break;
 		}

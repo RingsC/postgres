@@ -11,7 +11,7 @@
  * Note: This file must be includable in both frontend and backend contexts,
  * to allow stand-alone tools like pg_receivewal to deal with WAL files.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/xlog_internal.h
@@ -31,7 +31,7 @@
 /*
  * Each page of XLOG file has a header like this:
  */
-#define XLOG_PAGE_MAGIC 0xD098	/* can be used as WAL version indicator */
+#define XLOG_PAGE_MAGIC 0xD108	/* can be used as WAL version indicator */
 
 typedef struct XLogPageHeaderData
 {
@@ -45,7 +45,7 @@ typedef struct XLogPageHeaderData
 	 * continue on the next page.  xlp_rem_len is the number of bytes
 	 * remaining from a previous page.
 	 *
-	 * Note that xl_rem_len includes backup-block data; that is, it tracks
+	 * Note that xlp_rem_len includes backup-block data; that is, it tracks
 	 * xl_tot_len not xl_len in the initial header.  Also note that the
 	 * continuation data isn't necessarily aligned.
 	 */
@@ -101,7 +101,7 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
 #define XLogSegmentsPerXLogId(wal_segsz_bytes)	\
 	(UINT64CONST(0x100000000) / (wal_segsz_bytes))
 
-#define XLogSegNoOffsetToRecPtr(segno, offset, dest, wal_segsz_bytes) \
+#define XLogSegNoOffsetToRecPtr(segno, offset, wal_segsz_bytes, dest) \
 		(dest) = (segno) * (wal_segsz_bytes) + (offset)
 
 #define XLogSegmentOffset(xlogptr, wal_segsz_bytes)	\
@@ -120,6 +120,13 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
 
 #define XLByteToPrevSeg(xlrp, logSegNo, wal_segsz_bytes) \
 	logSegNo = ((xlrp) - 1) / (wal_segsz_bytes)
+
+/*
+ * Convert values of GUCs measured in megabytes to equiv. segment count.
+ * Rounds down.
+ */
+#define XLogMBVarToSegs(mbvar, wal_segsz_bytes) \
+	((mbvar) / ((wal_segsz_bytes) / (1024 * 1024)))
 
 /*
  * Is an XLogRecPtr within a particular XLOG segment?
@@ -152,6 +159,10 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
 /* Length of XLog file name */
 #define XLOG_FNAME_LEN	   24
 
+/*
+ * Generate a WAL segment file name.  Do not use this macro in a helper
+ * function allocating the result generated.
+ */
 #define XLogFileName(fname, tli, logSegNo, wal_segsz_bytes)	\
 	snprintf(fname, MAXFNAMELEN, "%08X%08X%08X", tli,		\
 			 (uint32) ((logSegNo) / XLogSegmentsPerXLogId(wal_segsz_bytes)), \
@@ -226,6 +237,7 @@ typedef struct xl_parameter_change
 {
 	int			MaxConnections;
 	int			max_worker_processes;
+	int			max_wal_senders;
 	int			max_prepared_xacts;
 	int			max_locks_per_xact;
 	int			wal_level;
@@ -267,7 +279,7 @@ typedef enum
 	RECOVERY_TARGET_ACTION_PAUSE,
 	RECOVERY_TARGET_ACTION_PROMOTE,
 	RECOVERY_TARGET_ACTION_SHUTDOWN
-} RecoveryTargetAction;
+}			RecoveryTargetAction;
 
 /*
  * Method table for resource managers.
@@ -314,23 +326,5 @@ extern bool ArchiveRecoveryRequested;
 extern bool InArchiveRecovery;
 extern bool StandbyMode;
 extern char *recoveryRestoreCommand;
-
-/*
- * Prototypes for functions in xlogarchive.c
- */
-extern bool RestoreArchivedFile(char *path, const char *xlogfname,
-					const char *recovername, off_t expectedSize,
-					bool cleanupEnabled);
-extern void ExecuteRecoveryCommand(const char *command, const char *commandName,
-					   bool failOnerror);
-extern void KeepFileRestoredFromArchive(const char *path, const char *xlogfname);
-extern void XLogArchiveNotify(const char *xlog);
-extern void XLogArchiveNotifySeg(XLogSegNo segno);
-extern void XLogArchiveForceDone(const char *xlog);
-extern bool XLogArchiveCheckDone(const char *xlog);
-extern bool XLogArchiveIsBusy(const char *xlog);
-extern bool XLogArchiveIsReady(const char *xlog);
-extern bool XLogArchiveIsReadyOrDone(const char *xlog);
-extern void XLogArchiveCleanup(const char *xlog);
 
 #endif							/* XLOG_INTERNAL_H */

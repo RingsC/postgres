@@ -13,6 +13,12 @@
   and a trigger <function>lo_manage</function>.
  </para>
 
+ <para>
+  This module is considered <quote>trusted</quote>, that is, it can be
+  installed by non-superusers who have <literal>CREATE</literal> privilege
+  on the current database.
+ </para>
+
  <sect2>
   <title>Rationale</title>
 
@@ -70,7 +76,7 @@
 CREATE TABLE image (title text, raster lo);
 
 CREATE TRIGGER t_raster BEFORE UPDATE OR DELETE ON image
-    FOR EACH ROW EXECUTE PROCEDURE lo_manage(raster);
+    FOR EACH ROW EXECUTE FUNCTION lo_manage(raster);
 </programlisting>
 
   <para>

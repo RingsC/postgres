@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  * A stack of automaton states to handle nested conditionals.
  *
- * Copyright (c) 2000-2018, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2020, PostgreSQL Global Development Group
  *
  * src/fe_utils/conditional.c
  *
@@ -75,8 +75,9 @@ conditional_stack_depth(ConditionalStack cstack)
 		return -1;
 	else
 	{
-		IfStackElem	*p = cstack->head;
+		IfStackElem *p = cstack->head;
 		int			depth = 0;
+
 		while (p != NULL)
 		{
 			depth++;

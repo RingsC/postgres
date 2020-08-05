@@ -7,7 +7,7 @@
  *	 ExecProcNode, or ExecEndNode on its subnodes and do the appropriate
  *	 processing.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -88,6 +88,7 @@
 #include "executor/nodeGroup.h"
 #include "executor/nodeHash.h"
 #include "executor/nodeHashjoin.h"
+#include "executor/nodeIncrementalSort.h"
 #include "executor/nodeIndexonlyscan.h"
 #include "executor/nodeIndexscan.h"
 #include "executor/nodeLimit.h"
@@ -113,9 +114,8 @@
 #include "executor/nodeValuesscan.h"
 #include "executor/nodeWindowAgg.h"
 #include "executor/nodeWorktablescan.h"
-#include "nodes/nodeFuncs.h"
 #include "miscadmin.h"
-
+#include "nodes/nodeFuncs.h"
 
 static TupleTableSlot *ExecProcNodeFirst(PlanState *node);
 static TupleTableSlot *ExecProcNodeInstr(PlanState *node);
@@ -314,6 +314,11 @@ ExecInitNode(Plan *node, EState *estate, int eflags)
 												estate, eflags);
 			break;
 
+		case T_IncrementalSort:
+			result = (PlanState *) ExecInitIncrementalSort((IncrementalSort *) node,
+														   estate, eflags);
+			break;
+
 		case T_Group:
 			result = (PlanState *) ExecInitGroup((Group *) node,
 												 estate, eflags);
@@ -407,10 +412,9 @@ ExecSetExecProcNode(PlanState *node, ExecProcNodeMtd function)
 {
 	/*
 	 * Add a wrapper around the ExecProcNode callback that checks stack depth
-	 * during the first execution and maybe adds an instrumentation
-	 * wrapper. When the callback is changed after execution has already begun
-	 * that means we'll superfluously execute ExecProcNodeFirst, but that seems
-	 * ok.
+	 * during the first execution and maybe adds an instrumentation wrapper.
+	 * When the callback is changed after execution has already begun that
+	 * means we'll superfluously execute ExecProcNodeFirst, but that seems ok.
 	 */
 	node->ExecProcNodeReal = function;
 	node->ExecProcNode = ExecProcNodeFirst;
@@ -695,6 +699,10 @@ ExecEndNode(PlanState *node)
 			ExecEndSort((SortState *) node);
 			break;
 
+		case T_IncrementalSortState:
+			ExecEndIncrementalSort((IncrementalSortState *) node);
+			break;
+
 		case T_GroupState:
 			ExecEndGroup((GroupState *) node);
 			break;
@@ -737,11 +745,7 @@ ExecEndNode(PlanState *node)
  * ExecShutdownNode
  *
  * Give execution nodes a chance to stop asynchronous resource consumption
- * and release any resources still held.  Currently, this is only used for
- * parallel query, but we might want to extend it to other cases also (e.g.
- * FDW).  We might also want to call it sooner, as soon as it's evident that
- * no more rows will be needed (e.g. when a Limit is filled) rather than only
- * at the end of ExecutorRun.
+ * and release any resources still held.
  */
 bool
 ExecShutdownNode(PlanState *node)
@@ -750,6 +754,19 @@ ExecShutdownNode(PlanState *node)
 		return false;
 
 	check_stack_depth();
+
+	/*
+	 * Treat the node as running while we shut it down, but only if it's run
+	 * at least once already.  We don't expect much CPU consumption during
+	 * node shutdown, but in the case of Gather or Gather Merge, we may shut
+	 * down workers at this stage.  If so, their buffer usage will get
+	 * propagated into pgBufferUsage at this point, and we want to make sure
+	 * that it gets associated with the Gather node.  We skip this if the node
+	 * has never been executed, so as to avoid incorrectly making it appear
+	 * that it has.
+	 */
+	if (node->instrument && node->instrument->running)
+		InstrStartNode(node->instrument);
 
 	planstate_tree_walker(node, ExecShutdownNode, NULL);
 
@@ -776,6 +793,10 @@ ExecShutdownNode(PlanState *node)
 		default:
 			break;
 	}
+
+	/* Stop the node if we started it above, reporting 0 tuples. */
+	if (node->instrument && node->instrument->running)
+		InstrStopNode(node->instrument, 0);
 
 	return false;
 }
@@ -827,6 +848,43 @@ ExecSetTupleBound(int64 tuples_needed, PlanState *child_node)
 			sortState->bounded = true;
 			sortState->bound = tuples_needed;
 		}
+	}
+	else if (IsA(child_node, IncrementalSortState))
+	{
+		/*
+		 * If it is an IncrementalSort node, notify it that it can use bounded
+		 * sort.
+		 *
+		 * Note: it is the responsibility of nodeIncrementalSort.c to react
+		 * properly to changes of these parameters.  If we ever redesign this,
+		 * it'd be a good idea to integrate this signaling with the
+		 * parameter-change mechanism.
+		 */
+		IncrementalSortState *sortState = (IncrementalSortState *) child_node;
+
+		if (tuples_needed < 0)
+		{
+			/* make sure flag gets reset if needed upon rescan */
+			sortState->bounded = false;
+		}
+		else
+		{
+			sortState->bounded = true;
+			sortState->bound = tuples_needed;
+		}
+	}
+	else if (IsA(child_node, AppendState))
+	{
+		/*
+		 * If it is an Append, we can apply the bound to any nodes that are
+		 * children of the Append, since the Append surely need read no more
+		 * than that many tuples from any one input.
+		 */
+		AppendState *aState = (AppendState *) child_node;
+		int			i;
+
+		for (i = 0; i < aState->as_nplans; i++)
+			ExecSetTupleBound(tuples_needed, aState->appendplans[i]);
 	}
 	else if (IsA(child_node, MergeAppendState))
 	{

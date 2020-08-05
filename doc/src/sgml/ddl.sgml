@@ -233,6 +233,150 @@ CREATE TABLE products (
   </para>
  </sect1>
 
+ <sect1 id="ddl-generated-columns">
+  <title>Generated Columns</title>
+
+  <indexterm zone="ddl-generated-columns">
+   <primary>generated column</primary>
+  </indexterm>
+
+  <para>
+   A generated column is a special column that is always computed from other
+   columns.  Thus, it is for columns what a view is for tables.  There are two
+   kinds of generated columns: stored and virtual.  A stored generated column
+   is computed when it is written (inserted or updated) and occupies storage
+   as if it were a normal column.  A virtual generated column occupies no
+   storage and is computed when it is read.  Thus, a virtual generated column
+   is similar to a view and a stored generated column is similar to a
+   materialized view (except that it is always updated automatically).
+   PostgreSQL currently implements only stored generated columns.
+  </para>
+
+  <para>
+   To create a generated column, use the <literal>GENERATED ALWAYS
+   AS</literal> clause in <command>CREATE TABLE</command>, for example:
+<programlisting>
+CREATE TABLE people (
+    ...,
+    height_cm numeric,
+    height_in numeric <emphasis>GENERATED ALWAYS AS (height_cm / 2.54) STORED</emphasis>
+);
+</programlisting>
+   The keyword <literal>STORED</literal> must be specified to choose the
+   stored kind of generated column.  See <xref linkend="sql-createtable"/> for
+   more details.
+  </para>
+
+  <para>
+   A generated column cannot be written to directly.  In
+   <command>INSERT</command> or <command>UPDATE</command> commands, a value
+   cannot be specified for a generated column, but the keyword
+   <literal>DEFAULT</literal> may be specified.
+  </para>
+
+  <para>
+   Consider the differences between a column with a default and a generated
+   column.  The column default is evaluated once when the row is first
+   inserted if no other value was provided; a generated column is updated
+   whenever the row changes and cannot be overridden.  A column default may
+   not refer to other columns of the table; a generation expression would
+   normally do so.  A column default can use volatile functions, for example
+   <literal>random()</literal> or functions referring to the current time;
+   this is not allowed for generated columns.
+  </para>
+
+  <para>
+   Several restrictions apply to the definition of generated columns and
+   tables involving generated columns:
+
+   <itemizedlist>
+    <listitem>
+     <para>
+      The generation expression can only use immutable functions and cannot
+      use subqueries or reference anything other than the current row in any
+      way.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A generation expression cannot reference another generated column.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A generation expression cannot reference a system column, except
+      <varname>tableoid</varname>.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A generated column cannot have a column default or an identity definition.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      A generated column cannot be part of a partition key.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Foreign tables can have generated columns.  See <xref
+      linkend="sql-createforeigntable"/> for details.
+     </para>
+    </listitem>
+    <listitem>
+     <para>For inheritance:</para>
+     <itemizedlist>
+      <listitem>
+       <para>
+        If a parent column is a generated column, a child column must also be
+        a generated column using the same expression.  In the definition of
+        the child column, leave off the <literal>GENERATED</literal> clause,
+        as it will be copied from the parent.
+       </para>
+      </listitem>
+      <listitem>
+       <para>
+        In case of multiple inheritance, if one parent column is a generated
+        column, then all parent columns must be generated columns and with the
+        same expression.
+       </para>
+      </listitem>
+      <listitem>
+       <para>
+        If a parent column is not a generated column, a child column may be
+        defined to be a generated column or not.
+       </para>
+      </listitem>
+     </itemizedlist>
+    </listitem>
+   </itemizedlist>
+  </para>
+
+  <para>
+   Additional considerations apply to the use of generated columns.
+   <itemizedlist>
+    <listitem>
+     <para>
+      Generated columns maintain access privileges separately from their
+      underlying base columns.  So, it is possible to arrange it so that a
+      particular role can read from a generated column but not from the
+      underlying base columns.
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Generated columns are, conceptually, updated after
+      <literal>BEFORE</literal> triggers have run.  Therefore, changes made to
+      base columns in a <literal>BEFORE</literal> trigger will be reflected in
+      generated columns.  But conversely, it is not allowed to access
+      generated columns in <literal>BEFORE</literal> triggers.
+     </para>
+    </listitem>
+   </itemizedlist>
+  </para>
+ </sect1>
+
  <sect1 id="ddl-constraints">
   <title>Constraints</title>
 
@@ -403,6 +547,59 @@ CREATE TABLE products (
     ensure that a column does not contain null values, the not-null
     constraint described in the next section can be used.
    </para>
+
+   <note>
+    <para>
+     <productname>PostgreSQL</productname> does not support
+     <literal>CHECK</literal> constraints that reference table data other than
+     the new or updated row being checked.  While a <literal>CHECK</literal>
+     constraint that violates this rule may appear to work in simple
+     tests, it cannot guarantee that the database will not reach a state
+     in which the constraint condition is false (due to subsequent changes
+     of the other row(s) involved).  This would cause a database dump and
+     reload to fail.  The reload could fail even when the complete
+     database state is consistent with the constraint, due to rows not
+     being loaded in an order that will satisfy the constraint.  If
+     possible, use <literal>UNIQUE</literal>, <literal>EXCLUDE</literal>,
+     or <literal>FOREIGN KEY</literal> constraints to express
+     cross-row and cross-table restrictions.
+    </para>
+
+    <para>
+     If what you desire is a one-time check against other rows at row
+     insertion, rather than a continuously-maintained consistency
+     guarantee, a custom <link linkend="triggers">trigger</link> can be used
+     to implement that.  (This approach avoids the dump/reload problem because
+     <application>pg_dump</application> does not reinstall triggers until after
+     reloading data, so that the check will not be enforced during a
+     dump/reload.)
+    </para>
+   </note>
+
+   <note>
+    <para>
+     <productname>PostgreSQL</productname> assumes that
+     <literal>CHECK</literal> constraints' conditions are immutable, that
+     is, they will always give the same result for the same input row.
+     This assumption is what justifies examining <literal>CHECK</literal>
+     constraints only when rows are inserted or updated, and not at other
+     times.  (The warning above about not referencing other table data is
+     really a special case of this restriction.)
+    </para>
+
+    <para>
+     An example of a common way to break this assumption is to reference a
+     user-defined function in a <literal>CHECK</literal> expression, and
+     then change the behavior of that
+     function.  <productname>PostgreSQL</productname> does not disallow
+     that, but it will not notice if there are rows in the table that now
+     violate the <literal>CHECK</literal> constraint. That would cause a
+     subsequent database dump and reload to fail.
+     The recommended way to handle such a change is to drop the constraint
+     (using <command>ALTER TABLE</command>), adjust the function definition,
+     and re-add the constraint, thereby rechecking it against all table rows.
+    </para>
+   </note>
   </sect2>
 
   <sect2>
@@ -939,24 +1136,6 @@ CREATE TABLE circles (
 
   <variablelist>
    <varlistentry>
-    <term><structfield>oid</structfield></term>
-    <listitem>
-     <para>
-      <indexterm>
-       <primary>OID</primary>
-       <secondary>column</secondary>
-      </indexterm>
-      The object identifier (object ID) of a row. This column is only
-      present if the table was created using <literal>WITH
-      OIDS</literal>, or if the <xref linkend="guc-default-with-oids"/>
-      configuration variable was set at the time. This column is of type
-      <type>oid</type> (same name as the column); see <xref
-      linkend="datatype-oid"/> for more information about the type.
-     </para>
-    </listitem>
-   </varlistentry>
-
-   <varlistentry>
     <term><structfield>tableoid</structfield></term>
     <listitem>
      <indexterm>
@@ -1049,52 +1228,11 @@ CREATE TABLE circles (
       <structfield>ctid</structfield> will change if it is
       updated or moved by <command>VACUUM FULL</command>.  Therefore
       <structfield>ctid</structfield> is useless as a long-term row
-      identifier.  The OID, or even better a user-defined serial
-      number, should be used to identify logical rows.
+      identifier.  A primary key should be used to identify logical rows.
      </para>
     </listitem>
    </varlistentry>
   </variablelist>
-
-   <para>
-    OIDs are 32-bit quantities and are assigned from a single
-    cluster-wide counter.  In a large or long-lived database, it is
-    possible for the counter to wrap around.  Hence, it is bad
-    practice to assume that OIDs are unique, unless you take steps to
-    ensure that this is the case.  If you need to identify the rows in
-    a table, using a sequence generator is strongly recommended.
-    However, OIDs can be used as well, provided that a few additional
-    precautions are taken:
-
-    <itemizedlist>
-     <listitem>
-      <para>
-       A unique constraint should be created on the OID column of each
-       table for which the OID will be used to identify rows.  When such
-       a unique constraint (or unique index) exists, the system takes
-       care not to generate an OID matching an already-existing row.
-       (Of course, this is only possible if the table contains fewer
-       than 2<superscript>32</superscript> (4 billion) rows, and in practice the
-       table size had better be much less than that, or performance
-       might suffer.)
-      </para>
-     </listitem>
-     <listitem>
-      <para>
-       OIDs should never be assumed to be unique across tables; use
-       the combination of <structfield>tableoid</structfield> and row OID if you
-       need a database-wide identifier.
-      </para>
-     </listitem>
-     <listitem>
-      <para>
-       Of course, the tables in question must be created <literal>WITH
-       OIDS</literal>.  As of <productname>PostgreSQL</productname> 8.1,
-       <literal>WITHOUT OIDS</literal> is the default.
-      </para>
-     </listitem>
-    </itemizedlist>
-   </para>
 
    <para>
     Transaction identifiers are also 32-bit quantities.  In a
@@ -1189,6 +1327,29 @@ ALTER TABLE products ADD COLUMN description text;
     value is given (null if you don't specify a <literal>DEFAULT</literal> clause).
    </para>
 
+   <tip>
+    <para>
+     From <productname>PostgreSQL</productname> 11, adding a column with
+     a constant default value no longer means that each row of the table
+     needs to be updated when the <command>ALTER TABLE</command> statement
+     is executed. Instead, the default value will be returned the next time
+     the row is accessed, and applied when the table is rewritten, making
+     the <command>ALTER TABLE</command> very fast even on large tables.
+    </para>
+
+    <para>
+     However, if the default value is volatile (e.g.
+     <function>clock_timestamp()</function>)
+     each row will need to be updated with the value calculated at the time
+     <command>ALTER TABLE</command> is executed. To avoid a potentially
+     lengthy update operation, particularly if you intend to fill the column
+     with mostly nondefault values anyway, it may be preferable to add the
+     column with no default, insert the correct values using
+     <command>UPDATE</command>, and then add any desired default as described
+     below.
+    </para>
+   </tip>
+
    <para>
     You can also define constraints on the column at the same time,
     using the usual syntax:
@@ -1203,17 +1364,6 @@ ALTER TABLE products ADD COLUMN description text CHECK (description &lt;&gt; '')
     correctly.
    </para>
 
-  <tip>
-   <para>
-    Adding a column with a default requires updating each row of the
-    table (to store the new column value).  However, if no default is
-    specified, <productname>PostgreSQL</productname> is able to avoid
-    the physical update.  So if you intend to fill the column with
-    mostly nondefault values, it's best to add the column with no default,
-    insert the correct values using <command>UPDATE</command>, and then add any
-    desired default as described below.
-   </para>
-  </tip>
   </sect2>
 
   <sect2 id="ddl-alter-removing-a-column">
@@ -1427,6 +1577,10 @@ ALTER TABLE products RENAME TO items;
    <primary>REVOKE</primary>
   </indexterm>
 
+  <indexterm zone="ddl-priv">
+   <primary>ACL</primary>
+  </indexterm>
+
   <para>
    When an object is created, it is assigned an owner. The
    owner is normally the role that executed the creation statement.
@@ -1444,29 +1598,31 @@ ALTER TABLE products RENAME TO items;
    <literal>EXECUTE</literal>, and <literal>USAGE</literal>.
    The privileges applicable to a particular
    object vary depending on the object's type (table, function, etc).
-   For complete information on the different types of privileges
-   supported by <productname>PostgreSQL</productname>, refer to the
-   <xref linkend="sql-grant"/> reference
-   page.  The following sections and chapters will also show you how
-   those privileges are used.
+   More detail about the meanings of these privileges appears below.
+   The following sections and chapters will also show you how
+   these privileges are used.
   </para>
 
   <para>
-   The right to modify or destroy an object is always the privilege of
-   the owner only.
+   The right to modify or destroy an object is inherent in being the
+   object's owner, and cannot be granted or revoked in itself.
+   (However, like all privileges, that right can be inherited by
+   members of the owning role; see <xref linkend="role-membership"/>.)
   </para>
 
   <para>
    An object can be assigned to a new owner with an <command>ALTER</command>
-   command of the appropriate kind for the object, e.g. <xref
-   linkend="sql-altertable"/>.  Superusers can always do
-   this; ordinary roles can only do it if they are both the current owner
-   of the object (or a member of the owning role) and a member of the new
-   owning role.
+   command of the appropriate kind for the object, for example
+<programlisting>
+ALTER TABLE <replaceable>table_name</replaceable> OWNER TO <replaceable>new_owner</replaceable>;
+</programlisting>
+   Superusers can always do this; ordinary roles can only do it if they are
+   both the current owner of the object (or a member of the owning role) and
+   a member of the new owning role.
   </para>
 
   <para>
-   To assign privileges, the <command>GRANT</command> command is
+   To assign privileges, the <xref linkend="sql-grant"/> command is
    used. For example, if <literal>joe</literal> is an existing role, and
    <literal>accounts</literal> is an existing table, the privilege to
    update the table can be granted with:
@@ -1486,17 +1642,11 @@ GRANT UPDATE ON accounts TO joe;
   </para>
 
   <para>
-   To revoke a privilege, use the fittingly named
-   <command>REVOKE</command> command:
+   To revoke a previously-granted privilege, use the fittingly named
+   <xref linkend="sql-revoke"/> command:
 <programlisting>
 REVOKE ALL ON accounts FROM PUBLIC;
 </programlisting>
-   The special privileges of the object owner (i.e., the right to do
-   <command>DROP</command>, <command>GRANT</command>, <command>REVOKE</command>, etc.)
-   are always implicit in being the owner,
-   and cannot be granted or revoked.  But the object owner can choose
-   to revoke their own ordinary privileges, for example to make a
-   table read-only for themselves as well as others.
   </para>
 
   <para>
@@ -1508,6 +1658,525 @@ REVOKE ALL ON accounts FROM PUBLIC;
    recipient (directly or through a chain of grants) will lose the
    privilege.  For details see the <xref linkend="sql-grant"/> and
    <xref linkend="sql-revoke"/> reference pages.
+  </para>
+
+  <para>
+   An object's owner can choose to revoke their own ordinary privileges,
+   for example to make a table read-only for themselves as well as others.
+   But owners are always treated as holding all grant options, so they
+   can always re-grant their own privileges.
+  </para>
+
+  <para>
+   The available privileges are:
+
+   <variablelist>
+    <varlistentry>
+     <term><literal>SELECT</literal></term>
+     <listitem>
+      <para>
+       Allows <xref linkend="sql-select"/> from
+       any column, or specific column(s), of a table, view, materialized
+       view, or other table-like object.
+       Also allows use of <xref linkend="sql-copy"/> TO.
+       This privilege is also needed to reference existing column values in
+       <xref linkend="sql-update"/> or <xref linkend="sql-delete"/>.
+       For sequences, this privilege also allows use of the
+       <function>currval</function> function.
+       For large objects, this privilege allows the object to be read.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>INSERT</literal></term>
+     <listitem>
+      <para>
+       Allows <xref linkend="sql-insert"/> of a new row into a table, view,
+       etc.  Can be granted on specific column(s), in which case
+       only those columns may be assigned to in the <command>INSERT</command>
+       command (other columns will therefore receive default values).
+       Also allows use of <xref linkend="sql-copy"/> FROM.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>UPDATE</literal></term>
+     <listitem>
+      <para>
+       Allows <xref linkend="sql-update"/> of any
+       column, or specific column(s), of a table, view, etc.
+       (In practice, any nontrivial <command>UPDATE</command> command will
+       require <literal>SELECT</literal> privilege as well, since it must
+       reference table columns to determine which rows to update, and/or to
+       compute new values for columns.)
+       <literal>SELECT ... FOR UPDATE</literal>
+       and <literal>SELECT ... FOR SHARE</literal>
+       also require this privilege on at least one column, in addition to the
+       <literal>SELECT</literal> privilege.  For sequences, this
+       privilege allows use of the <function>nextval</function> and
+       <function>setval</function> functions.
+       For large objects, this privilege allows writing or truncating the
+       object.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>DELETE</literal></term>
+     <listitem>
+      <para>
+       Allows <xref linkend="sql-delete"/> of a row from a table, view, etc.
+       (In practice, any nontrivial <command>DELETE</command> command will
+       require <literal>SELECT</literal> privilege as well, since it must
+       reference table columns to determine which rows to delete.)
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>TRUNCATE</literal></term>
+     <listitem>
+      <para>
+       Allows <xref linkend="sql-truncate"/> on a table, view, etc.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>REFERENCES</literal></term>
+     <listitem>
+      <para>
+       Allows creation of a foreign key constraint referencing a
+       table, or specific column(s) of a table.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>TRIGGER</literal></term>
+     <listitem>
+      <para>
+       Allows creation of a trigger on a table, view, etc.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>CREATE</literal></term>
+     <listitem>
+      <para>
+       For databases, allows new schemas and publications to be created within
+       the database, and allows trusted extensions to be installed within
+       the database.
+      </para>
+      <para>
+       For schemas, allows new objects to be created within the schema.
+       To rename an existing object, you must own the
+       object <emphasis>and</emphasis> have this privilege for the containing
+       schema.
+      </para>
+      <para>
+       For tablespaces, allows tables, indexes, and temporary files to be
+       created within the tablespace, and allows databases to be created that
+       have the tablespace as their default tablespace.
+      </para>
+      <para>
+       Note that revoking this privilege will not alter the existence or
+       location of existing objects.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>CONNECT</literal></term>
+     <listitem>
+      <para>
+       Allows the grantee to connect to the database.  This
+       privilege is checked at connection startup (in addition to checking
+       any restrictions imposed by <filename>pg_hba.conf</filename>).
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>TEMPORARY</literal></term>
+     <listitem>
+      <para>
+       Allows temporary tables to be created while using the database.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>EXECUTE</literal></term>
+     <listitem>
+      <para>
+       Allows calling a function or procedure, including use of
+       any operators that are implemented on top of the function.  This is the
+       only type of privilege that is applicable to functions and procedures.
+      </para>
+     </listitem>
+    </varlistentry>
+
+    <varlistentry>
+     <term><literal>USAGE</literal></term>
+     <listitem>
+      <para>
+       For procedural languages, allows use of the language for
+       the creation of functions in that language.  This is the only type
+       of privilege that is applicable to procedural languages.
+      </para>
+      <para>
+       For schemas, allows access to objects contained in the
+       schema (assuming that the objects' own privilege requirements are
+       also met).  Essentially this allows the grantee to <quote>look up</quote>
+       objects within the schema.  Without this permission, it is still
+       possible to see the object names, e.g. by querying system catalogs.
+       Also, after revoking this permission, existing sessions might have
+       statements that have previously performed this lookup, so this is not
+       a completely secure way to prevent object access.
+      </para>
+      <para>
+       For sequences, allows use of the
+       <function>currval</function> and <function>nextval</function> functions.
+      </para>
+      <para>
+       For types and domains, allows use of the type or domain in the
+       creation of tables, functions, and other schema objects.  (Note that
+       this privilege does not control all <quote>usage</quote> of the
+       type, such as values of the type appearing in queries.  It only
+       prevents objects from being created that depend on the type.  The
+       main purpose of this privilege is controlling which users can create
+       dependencies on a type, which could prevent the owner from changing
+       the type later.)
+      </para>
+      <para>
+       For foreign-data wrappers, allows creation of new servers using the
+       foreign-data wrapper.
+      </para>
+      <para>
+       For foreign servers, allows creation of foreign tables using the
+       server.  Grantees may also create, alter, or drop their own user
+       mappings associated with that server.
+      </para>
+     </listitem>
+    </varlistentry>
+   </variablelist>
+
+   The privileges required by other commands are listed on the
+   reference page of the respective command.
+  </para>
+
+  <para>
+   PostgreSQL grants privileges on some types of objects to
+   <literal>PUBLIC</literal> by default when the objects are created.
+   No privileges are granted to <literal>PUBLIC</literal> by default on
+   tables,
+   table columns,
+   sequences,
+   foreign data wrappers,
+   foreign servers,
+   large objects,
+   schemas,
+   or tablespaces.
+   For other types of objects, the default privileges
+   granted to <literal>PUBLIC</literal> are as follows:
+   <literal>CONNECT</literal> and <literal>TEMPORARY</literal> (create
+   temporary tables) privileges for databases;
+   <literal>EXECUTE</literal> privilege for functions and procedures; and
+   <literal>USAGE</literal> privilege for languages and data types
+   (including domains).
+   The object owner can, of course, <command>REVOKE</command>
+   both default and expressly granted privileges. (For maximum
+   security, issue the <command>REVOKE</command> in the same transaction that
+   creates the object; then there is no window in which another user
+   can use the object.)
+   Also, these default privilege settings can be overridden using the
+   <xref linkend="sql-alterdefaultprivileges"/> command.
+  </para>
+
+  <para>
+   <xref linkend="privilege-abbrevs-table"/> shows the one-letter
+   abbreviations that are used for these privilege types in
+   <firstterm>ACL</firstterm> (Access Control List) values.
+   You will see these letters in the output of the <xref linkend="app-psql"/>
+   commands listed below, or when looking at ACL columns of system catalogs.
+  </para>
+
+  <table id="privilege-abbrevs-table">
+   <title>ACL Privilege Abbreviations</title>
+   <tgroup cols="3">
+    <colspec colname="col1" colwidth="1*"/>
+    <colspec colname="col2" colwidth="1*"/>
+    <colspec colname="col3" colwidth="2*"/>
+    <thead>
+     <row>
+      <entry>Privilege</entry>
+      <entry>Abbreviation</entry>
+      <entry>Applicable Object Types</entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>SELECT</literal></entry>
+      <entry><literal>r</literal> (<quote>read</quote>)</entry>
+      <entry>
+       <literal>LARGE OBJECT</literal>,
+       <literal>SEQUENCE</literal>,
+       <literal>TABLE</literal> (and table-like objects),
+       table column
+      </entry>
+     </row>
+     <row>
+      <entry><literal>INSERT</literal></entry>
+      <entry><literal>a</literal> (<quote>append</quote>)</entry>
+      <entry><literal>TABLE</literal>, table column</entry>
+     </row>
+     <row>
+      <entry><literal>UPDATE</literal></entry>
+      <entry><literal>w</literal> (<quote>write</quote>)</entry>
+      <entry>
+       <literal>LARGE OBJECT</literal>,
+       <literal>SEQUENCE</literal>,
+       <literal>TABLE</literal>,
+       table column
+      </entry>
+     </row>
+     <row>
+      <entry><literal>DELETE</literal></entry>
+      <entry><literal>d</literal></entry>
+      <entry><literal>TABLE</literal></entry>
+     </row>
+     <row>
+      <entry><literal>TRUNCATE</literal></entry>
+      <entry><literal>D</literal></entry>
+      <entry><literal>TABLE</literal></entry>
+     </row>
+     <row>
+      <entry><literal>REFERENCES</literal></entry>
+      <entry><literal>x</literal></entry>
+      <entry><literal>TABLE</literal>, table column</entry>
+     </row>
+     <row>
+      <entry><literal>TRIGGER</literal></entry>
+      <entry><literal>t</literal></entry>
+      <entry><literal>TABLE</literal></entry>
+     </row>
+     <row>
+      <entry><literal>CREATE</literal></entry>
+      <entry><literal>C</literal></entry>
+      <entry>
+       <literal>DATABASE</literal>,
+       <literal>SCHEMA</literal>,
+       <literal>TABLESPACE</literal>
+      </entry>
+     </row>
+     <row>
+      <entry><literal>CONNECT</literal></entry>
+      <entry><literal>c</literal></entry>
+      <entry><literal>DATABASE</literal></entry>
+     </row>
+     <row>
+      <entry><literal>TEMPORARY</literal></entry>
+      <entry><literal>T</literal></entry>
+      <entry><literal>DATABASE</literal></entry>
+     </row>
+     <row>
+      <entry><literal>EXECUTE</literal></entry>
+      <entry><literal>X</literal></entry>
+      <entry><literal>FUNCTION</literal>, <literal>PROCEDURE</literal></entry>
+     </row>
+     <row>
+      <entry><literal>USAGE</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry>
+       <literal>DOMAIN</literal>,
+       <literal>FOREIGN DATA WRAPPER</literal>,
+       <literal>FOREIGN SERVER</literal>,
+       <literal>LANGUAGE</literal>,
+       <literal>SCHEMA</literal>,
+       <literal>SEQUENCE</literal>,
+       <literal>TYPE</literal>
+      </entry>
+     </row>
+     </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   <xref linkend="privileges-summary-table"/> summarizes the privileges
+   available for each type of SQL object, using the abbreviations shown
+   above.
+   It also shows the <application>psql</application> command
+   that can be used to examine privilege settings for each object type.
+  </para>
+
+  <table id="privileges-summary-table">
+   <title>Summary of Access Privileges</title>
+   <tgroup cols="4">
+    <colspec colname="col1" colwidth="2*"/>
+    <colspec colname="col2" colwidth="1*"/>
+    <colspec colname="col3" colwidth="1*"/>
+    <colspec colname="col4" colwidth="1*"/>
+    <thead>
+     <row>
+      <entry>Object Type</entry>
+      <entry>All Privileges</entry>
+      <entry>Default <literal>PUBLIC</literal> Privileges</entry>
+      <entry><application>psql</application> Command</entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry><literal>DATABASE</literal></entry>
+      <entry><literal>CTc</literal></entry>
+      <entry><literal>Tc</literal></entry>
+      <entry><literal>\l</literal></entry>
+     </row>
+     <row>
+      <entry><literal>DOMAIN</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry><literal>\dD+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>FUNCTION</literal> or <literal>PROCEDURE</literal></entry>
+      <entry><literal>X</literal></entry>
+      <entry><literal>X</literal></entry>
+      <entry><literal>\df+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>FOREIGN DATA WRAPPER</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\dew+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>FOREIGN SERVER</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\des+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>LANGUAGE</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry><literal>\dL+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>LARGE OBJECT</literal></entry>
+      <entry><literal>rw</literal></entry>
+      <entry>none</entry>
+      <entry></entry>
+     </row>
+     <row>
+      <entry><literal>SCHEMA</literal></entry>
+      <entry><literal>UC</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\dn+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>SEQUENCE</literal></entry>
+      <entry><literal>rwU</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\dp</literal></entry>
+     </row>
+     <row>
+      <entry><literal>TABLE</literal> (and table-like objects)</entry>
+      <entry><literal>arwdDxt</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\dp</literal></entry>
+     </row>
+     <row>
+      <entry>Table column</entry>
+      <entry><literal>arwx</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\dp</literal></entry>
+     </row>
+     <row>
+      <entry><literal>TABLESPACE</literal></entry>
+      <entry><literal>C</literal></entry>
+      <entry>none</entry>
+      <entry><literal>\db+</literal></entry>
+     </row>
+     <row>
+      <entry><literal>TYPE</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry><literal>U</literal></entry>
+      <entry><literal>\dT+</literal></entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+
+  <para>
+   <indexterm>
+    <primary><type>aclitem</type></primary>
+   </indexterm>
+   The privileges that have been granted for a particular object are
+   displayed as a list of <type>aclitem</type> entries, where each
+   <type>aclitem</type> describes the permissions of one grantee that
+   have been granted by a particular grantor.  For example,
+   <literal>calvin=r*w/hobbes</literal> specifies that the role
+   <literal>calvin</literal> has the privilege
+   <literal>SELECT</literal> (<literal>r</literal>) with grant option
+   (<literal>*</literal>) as well as the non-grantable
+   privilege <literal>UPDATE</literal> (<literal>w</literal>), both granted
+   by the role <literal>hobbes</literal>.  If <literal>calvin</literal>
+   also has some privileges on the same object granted by a different
+   grantor, those would appear as a separate <type>aclitem</type> entry.
+   An empty grantee field in an <type>aclitem</type> stands
+   for <literal>PUBLIC</literal>.
+  </para>
+
+  <para>
+   As an example, suppose that user <literal>miriam</literal> creates
+   table <literal>mytable</literal> and does:
+<programlisting>
+GRANT SELECT ON mytable TO PUBLIC;
+GRANT SELECT, UPDATE, INSERT ON mytable TO admin;
+GRANT SELECT (col1), UPDATE (col1) ON mytable TO miriam_rw;
+</programlisting>
+   Then <application>psql</application>'s <literal>\dp</literal> command
+   would show:
+<programlisting>
+=&gt; \dp mytable
+                                  Access privileges
+ Schema |  Name   | Type  |   Access privileges   |   Column privileges   | Policies
+--------+---------+-------+-----------------------+-----------------------+----------
+ public | mytable | table | miriam=arwdDxt/miriam+| col1:                +|
+        |         |       | =r/miriam            +|   miriam_rw=rw/miriam |
+        |         |       | admin=arw/miriam      |                       |
+(1 row)
+</programlisting>
+  </para>
+
+  <para>
+   If the <quote>Access privileges</quote> column is empty for a given
+   object, it means the object has default privileges (that is, its
+   privileges entry in the relevant system catalog is null).  Default
+   privileges always include all privileges for the owner, and can include
+   some privileges for <literal>PUBLIC</literal> depending on the object
+   type, as explained above.  The first <command>GRANT</command>
+   or <command>REVOKE</command> on an object will instantiate the default
+   privileges (producing, for
+   example, <literal>miriam=arwdDxt/miriam</literal>) and then modify them
+   per the specified request.  Similarly, entries are shown in <quote>Column
+   privileges</quote> only for columns with nondefault privileges.
+   (Note: for this purpose, <quote>default privileges</quote> always means
+   the built-in default privileges for the object's type.  An object whose
+   privileges have been affected by an <command>ALTER DEFAULT
+   PRIVILEGES</command> command will always be shown with an explicit
+   privilege entry that includes the effects of
+   the <command>ALTER</command>.)
+  </para>
+
+  <para>
+   Notice that the owner's implicit grant options are not marked in the
+   access privileges display.  A <literal>*</literal> will appear only when
+   grant options have been explicitly granted to someone.
   </para>
  </sect1>
 
@@ -1624,9 +2293,20 @@ CREATE POLICY account_managers ON accounts TO managers
 </programlisting>
 
   <para>
+   The policy above implicitly provides a <literal>WITH CHECK</literal>
+   clause identical to its <literal>USING</literal> clause, so that the
+   constraint applies both to rows selected by a command (so a manager
+   cannot <command>SELECT</command>, <command>UPDATE</command>,
+   or <command>DELETE</command> existing rows belonging to a different
+   manager) and to rows modified by a command (so rows belonging to a
+   different manager cannot be created via <command>INSERT</command>
+   or <command>UPDATE</command>).
+  </para>
+
+  <para>
    If no role is specified, or the special user name
    <literal>PUBLIC</literal> is used, then the policy applies to all
-   users on the system.  To allow all users to access their own row in
+   users on the system.  To allow all users to access only their own row in
    a <literal>users</literal> table, a simple policy can be used:
   </para>
 
@@ -1636,17 +2316,30 @@ CREATE POLICY user_policy ON users
 </programlisting>
 
   <para>
+   This works similarly to the previous example.
+  </para>
+
+  <para>
    To use a different policy for rows that are being added to the table
-   compared to those rows that are visible, the <literal>WITH CHECK</literal>
-   clause can be used.  This policy would allow all users to view all rows
+   compared to those rows that are visible, multiple policies can be
+   combined.  This pair of policies would allow all users to view all rows
    in the <literal>users</literal> table, but only modify their own:
   </para>
 
 <programlisting>
-CREATE POLICY user_policy ON users
-    USING (true)
-    WITH CHECK (user_name = current_user);
+CREATE POLICY user_sel_policy ON users
+    FOR SELECT
+    USING (true);
+CREATE POLICY user_mod_policy ON users
+    USING (user_name = current_user);
 </programlisting>
+
+  <para>
+   In a <command>SELECT</command> command, these two policies are combined
+   using <literal>OR</literal>, with the net effect being that all rows
+   can be selected.  In other command types, only the second policy applies,
+   so that the effects are the same as before.
+  </para>
 
   <para>
    Row security can also be disabled with the <command>ALTER TABLE</command>
@@ -1965,19 +2658,18 @@ SELECT * FROM information WHERE group_id = 2 FOR UPDATE;
   </indexterm>
 
   <para>
-   A <productname>PostgreSQL</productname> database cluster
-   contains one or more named databases.  Users and groups of users are
-   shared across the entire cluster, but no other data is shared across
-   databases.  Any given client connection to the server can access
-   only the data in a single database, the one specified in the connection
-   request.
+   A <productname>PostgreSQL</productname> database cluster contains
+   one or more named databases.  Roles and a few other object types are
+   shared across the entire cluster.  A client connection to the server
+   can only access data in a single database, the one specified in the
+   connection request.
   </para>
 
   <note>
    <para>
     Users of a cluster do not necessarily have the privilege to access every
-    database in the cluster.  Sharing of user names means that there
-    cannot be different users named, say, <literal>joe</literal> in two databases
+    database in the cluster.  Sharing of role names means that there
+    cannot be different roles named, say, <literal>joe</literal> in two databases
     in the same cluster; but the system can be configured to allow
     <literal>joe</literal> access to only some of the databases.
    </para>
@@ -2354,51 +3046,57 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
    <title>Usage Patterns</title>
 
    <para>
-    Schemas can be used to organize your data in many ways.  There are a few
-    usage patterns easily supported by the default configuration, only one of
-    which suffices when database users mistrust other database users:
+    Schemas can be used to organize your data in many ways.
+    A <firstterm>secure schema usage pattern</firstterm> prevents untrusted
+    users from changing the behavior of other users' queries.  When a database
+    does not use a secure schema usage pattern, users wishing to securely
+    query that database would take protective action at the beginning of each
+    session.  Specifically, they would begin each session by
+    setting <varname>search_path</varname> to the empty string or otherwise
+    removing non-superuser-writable schemas
+    from <varname>search_path</varname>.  There are a few usage patterns
+    easily supported by the default configuration:
     <itemizedlist>
      <listitem>
       <!-- "DROP SCHEMA public" is inferior to this REVOKE, because pg_dump
-           doesn't preserve that DROP. -->
+           doesn't preserve that DROP.
+
+           A database owner can attack the database's users via "CREATE SCHEMA
+           trojan; ALTER DATABASE $mydb SET search_path = trojan, public;".  A
+           CREATEROLE user can issue "GRANT $dbowner TO $me" and then use the
+           database owner attack. -->
       <para>
        Constrain ordinary users to user-private schemas.  To implement this,
        issue <literal>REVOKE CREATE ON SCHEMA public FROM PUBLIC</literal>,
-       and create a schema for each user with the same name as that user.  If
-       affected users had logged in before this, consider auditing the public
+       and create a schema for each user with the same name as that user.
+       Recall that the default search path starts
+       with <literal>$user</literal>, which resolves to the user name.
+       Therefore, if each user has a separate schema, they access their own
+       schemas by default.  After adopting this pattern in a database where
+       untrusted users had already logged in, consider auditing the public
        schema for objects named like objects in
-       schema <literal>pg_catalog</literal>.  Recall that the default search
-       path starts with <literal>$user</literal>, which resolves to the user
-       name.  Therefore, if each user has a separate schema, they access their
-       own schemas by default.
+       schema <literal>pg_catalog</literal>.  This pattern is a secure schema
+       usage pattern unless an untrusted user is the database owner or holds
+       the <literal>CREATEROLE</literal> privilege, in which case no secure
+       schema usage pattern exists.
+      </para>
+      <para>
       </para>
      </listitem>
 
      <listitem>
       <para>
-       Remove the public schema from each user's default search path
-       using <literal>ALTER ROLE <replaceable>user</replaceable> SET
-       search_path = "$user"</literal>.  Everyone retains the ability to
-       create objects in the public schema, but only qualified names will
-       choose those objects.  A user holding the <literal>CREATEROLE</literal>
-       privilege can undo this setting and issue arbitrary queries under the
-       identity of users relying on the setting.  If you
-       grant <literal>CREATEROLE</literal> to users not warranting this
-       almost-superuser ability, use the first pattern instead.
-      </para>
-     </listitem>
-
-     <listitem>
-      <para>
-       Remove the public schema from <varname>search_path</varname> in
-       <link linkend="config-setting-configuration-file"><filename>postgresql.conf</filename></link>.
-       The ensuing user experience matches the previous pattern.  In addition
-       to that pattern's implications for <literal>CREATEROLE</literal>, this
-       trusts database owners the same way.  If you assign
-       the <literal>CREATEROLE</literal>
-       privilege, <literal>CREATEDB</literal> privilege or individual database
-       ownership to users not warranting almost-superuser access, use the
-       first pattern instead.
+       Remove the public schema from the default search path, by modifying
+       <link linkend="config-setting-configuration-file"><filename>postgresql.conf</filename></link>
+       or by issuing <literal>ALTER ROLE ALL SET search_path =
+       "$user"</literal>.  Everyone retains the ability to create objects in
+       the public schema, but only qualified names will choose those objects.
+       While qualified table references are fine, calls to functions in the
+       public schema <link linkend="typeconv-func">will be unsafe or
+       unreliable</link>.  If you create functions or extensions in the public
+       schema, use the first pattern instead.  Otherwise, like the first
+       pattern, this is secure unless an untrusted user is the database owner
+       or holds the <literal>CREATEROLE</literal> privilege.
       </para>
      </listitem>
 
@@ -2406,10 +3104,9 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
       <para>
        Keep the default.  All users access the public schema implicitly.  This
        simulates the situation where schemas are not available at all, giving
-       a smooth transition from the non-schema-aware world.  However, any user
-       can issue arbitrary queries under the identity of any user not electing
-       to protect itself individually.  This pattern is acceptable only when
-       the database has a single user or a few mutually-trusting users.
+       a smooth transition from the non-schema-aware world.  However, this is
+       never a secure pattern.  It is acceptable only when the database has a
+       single user or a few mutually-trusting users.
       </para>
      </listitem>
     </itemizedlist>
@@ -2493,7 +3190,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 CREATE TABLE cities (
     name            text,
     population      float,
-    altitude        int     -- in feet
+    elevation       int     -- in feet
 );
 
 CREATE TABLE capitals (
@@ -2513,40 +3210,40 @@ CREATE TABLE capitals (
    rows of a table or all rows of a table plus all of its descendant tables.
    The latter behavior is the default.
    For example, the following query finds the names of all cities,
-   including state capitals, that are located at an altitude over
+   including state capitals, that are located at an elevation over
    500 feet:
 
 <programlisting>
-SELECT name, altitude
+SELECT name, elevation
     FROM cities
-    WHERE altitude &gt; 500;
+    WHERE elevation &gt; 500;
 </programlisting>
 
    Given the sample data from the <productname>PostgreSQL</productname>
    tutorial (see <xref linkend="tutorial-sql-intro"/>), this returns:
 
 <programlisting>
-   name    | altitude
------------+----------
- Las Vegas |     2174
- Mariposa  |     1953
- Madison   |      845
+   name    | elevation
+-----------+-----------
+ Las Vegas |      2174
+ Mariposa  |      1953
+ Madison   |       845
 </programlisting>
   </para>
 
   <para>
    On the other hand, the following query finds all the cities that
-   are not state capitals and are situated at an altitude over 500 feet:
+   are not state capitals and are situated at an elevation over 500 feet:
 
 <programlisting>
-SELECT name, altitude
+SELECT name, elevation
     FROM ONLY cities
-    WHERE altitude &gt; 500;
+    WHERE elevation &gt; 500;
 
-   name    | altitude
------------+----------
- Las Vegas |     2174
- Mariposa  |     1953
+   name    | elevation
+-----------+-----------
+ Las Vegas |      2174
+ Mariposa  |      1953
 </programlisting>
   </para>
 
@@ -2565,9 +3262,9 @@ SELECT name, altitude
    to explicitly specify that descendant tables are included:
 
 <programlisting>
-SELECT name, altitude
+SELECT name, elevation
     FROM cities*
-    WHERE altitude &gt; 500;
+    WHERE elevation &gt; 500;
 </programlisting>
 
    Writing <literal>*</literal> is not necessary, since this behavior is always
@@ -2582,19 +3279,19 @@ SELECT name, altitude
    originating table:
 
 <programlisting>
-SELECT c.tableoid, c.name, c.altitude
+SELECT c.tableoid, c.name, c.elevation
 FROM cities c
-WHERE c.altitude &gt; 500;
+WHERE c.elevation &gt; 500;
 </programlisting>
 
    which returns:
 
 <programlisting>
- tableoid |   name    | altitude
-----------+-----------+----------
-   139793 | Las Vegas |     2174
-   139793 | Mariposa  |     1953
-   139798 | Madison   |      845
+ tableoid |   name    | elevation
+----------+-----------+-----------
+   139793 | Las Vegas |      2174
+   139793 | Mariposa  |      1953
+   139798 | Madison   |       845
 </programlisting>
 
    (If you try to reproduce this example, you will probably get
@@ -2602,19 +3299,19 @@ WHERE c.altitude &gt; 500;
    <structname>pg_class</structname> you can see the actual table names:
 
 <programlisting>
-SELECT p.relname, c.name, c.altitude
+SELECT p.relname, c.name, c.elevation
 FROM cities c, pg_class p
-WHERE c.altitude &gt; 500 AND c.tableoid = p.oid;
+WHERE c.elevation &gt; 500 AND c.tableoid = p.oid;
 </programlisting>
 
    which returns:
 
 <programlisting>
- relname  |   name    | altitude
-----------+-----------+----------
- cities   | Las Vegas |     2174
- cities   | Mariposa  |     1953
- capitals | Madison   |      845
+ relname  |   name    | elevation
+----------+-----------+-----------
+ cities   | Las Vegas |      2174
+ cities   | Mariposa  |      1953
+ capitals | Madison   |       845
 </programlisting>
   </para>
 
@@ -2623,9 +3320,9 @@ WHERE c.altitude &gt; 500 AND c.tableoid = p.oid;
    alias type, which will print the table OID symbolically:
 
 <programlisting>
-SELECT c.tableoid::regclass, c.name, c.altitude
+SELECT c.tableoid::regclass, c.name, c.elevation
 FROM cities c
-WHERE c.altitude &gt; 500;
+WHERE c.elevation &gt; 500;
 </programlisting>
   </para>
 
@@ -2635,7 +3332,7 @@ WHERE c.altitude &gt; 500;
    other tables in the inheritance hierarchy. In our example, the
    following <command>INSERT</command> statement will fail:
 <programlisting>
-INSERT INTO cities (name, population, altitude, state)
+INSERT INTO cities (name, population, elevation, state)
 VALUES ('Albany', NULL, NULL, 'NY');
 </programlisting>
    We might hope that the data would somehow be routed to the
@@ -2804,8 +3501,9 @@ VALUES ('Albany', NULL, NULL, 'NY');
     </listitem>
    </itemizedlist>
 
-   These deficiencies will probably be fixed in some future release,
-   but in the meantime considerable care is needed in deciding whether
+   Some functionality not implemented for inheritance hierarchies is
+   implemented for declarative partitioning.
+   Considerable care is needed in deciding whether partitioning with legacy
    inheritance is useful for your application.
   </para>
 
@@ -2946,7 +3644,7 @@ VALUES ('Albany', NULL, NULL, 'NY');
     divide a table into pieces called partitions.  The table that is divided
     is referred to as a <firstterm>partitioned table</firstterm>.  The
     specification consists of the <firstterm>partitioning method</firstterm>
-    and a list of columns or expressions to be used as the 
+    and a list of columns or expressions to be used as the
     <firstterm>partition key</firstterm>.
    </para>
 
@@ -2979,15 +3677,16 @@ VALUES ('Albany', NULL, NULL, 'NY');
    <para>
     Individual partitions are linked to the partitioned table with inheritance
     behind-the-scenes; however, it is not possible to use some of the
-    inheritance features discussed in the previous section with partitioned
-    tables and partitions.  For example, a partition cannot have any parents
-    other than the partitioned table it is a partition of, nor can a regular
-    table inherit from a partitioned table making the latter its parent.
-    That means partitioned tables and partitions do not participate in
-    inheritance with regular tables.  Since a partition hierarchy consisting
-    of the partitioned table and its partitions is still an inheritance
-    hierarchy, all the normal rules of inheritance apply as described in
-    <xref linkend="ddl-inherit"/> with some exceptions, most notably:
+    generic features of inheritance (discussed below) with declaratively
+    partitioned tables or their partitions.  For example, a partition
+    cannot have any parents other than the partitioned table it is a
+    partition of, nor can a regular table inherit from a partitioned table
+    making the latter its parent.  That means partitioned tables and their
+    partitions do not participate in inheritance with regular tables.
+    Since a partition hierarchy consisting of the partitioned table and its
+    partitions is still an inheritance hierarchy, all the normal rules of
+    inheritance apply as described in <xref linkend="ddl-inherit"/> with
+    some exceptions, most notably:
 
     <itemizedlist>
      <listitem>
@@ -3003,27 +3702,31 @@ VALUES ('Albany', NULL, NULL, 'NY');
      <listitem>
       <para>
        Using <literal>ONLY</literal> to add or drop a constraint on only the
-       partitioned table is supported when there are no partitions.  Once
+       partitioned table is supported as long as there are no partitions.  Once
        partitions exist, using <literal>ONLY</literal> will result in an error
        as adding or dropping constraints on only the partitioned table, when
-       partitions exist, is not supported.  Instead, constraints can be added
-       or dropped, when they are not present in the parent table, directly on
-       the partitions.  As a partitioned table does not have any data
-       directly, attempts to use <command>TRUNCATE</command>
-       <literal>ONLY</literal> on a partitioned table will always return an
-       error.
+       partitions exist, is not supported.  Instead, constraints on the
+       partitions themselves can be added and (if they are not present in the
+       parent table) dropped.
+      </para>
+     </listitem>
+
+     <listitem>
+      <para>
+       As a partitioned table does not have any data directly, attempts to use
+       <command>TRUNCATE</command> <literal>ONLY</literal> on a partitioned
+       table will always return an error.
       </para>
      </listitem>
 
      <listitem>
       <para>
        Partitions cannot have columns that are not present in the parent.  It
-       is neither possible to specify columns when creating partitions with
-       <command>CREATE TABLE</command> nor is it possible to add columns to
+       is not possible to specify columns when creating partitions with
+       <command>CREATE TABLE</command>, nor is it possible to add columns to
        partitions after-the-fact using <command>ALTER TABLE</command>.  Tables may be
        added as a partition with <command>ALTER TABLE ... ATTACH PARTITION</command>
-       only if their columns exactly match the parent, including any
-       <literal>oid</literal> column.
+       only if their columns exactly match the parent.
       </para>
      </listitem>
 
@@ -3044,7 +3747,7 @@ VALUES ('Albany', NULL, NULL, 'NY');
 
    <para>
     Updating the partition key of a row might cause it to be moved into a
-    different partition where this row satisfies its partition constraint.
+    different partition where this row satisfies the partition bounds.
    </para>
 
    <sect3 id="ddl-partitioning-declarative-example">
@@ -3196,7 +3899,7 @@ CREATE INDEX ON measurement (logdate);
 
       <listitem>
        <para>
-        Ensure that the <xref linkend="guc-constraint-exclusion"/>
+        Ensure that the <xref linkend="guc-enable-partition-pruning"/>
         configuration parameter is not disabled in <filename>postgresql.conf</filename>.
         If it is, queries will not be optimized as desired.
        </para>
@@ -3288,13 +3991,52 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
     <para>
      Before running the <command>ATTACH PARTITION</command> command, it is
      recommended to create a <literal>CHECK</literal> constraint on the table to
-     be attached describing the desired partition constraint.  That way,
+     be attached matching the desired partition constraint. That way,
      the system will be able to skip the scan to validate the implicit
-     partition constraint. Without such a constraint, the table will be
-     scanned to validate the partition constraint while holding an
-     <literal>ACCESS EXCLUSIVE</literal> lock on the parent table.
-     One may then drop the constraint after <command>ATTACH PARTITION</command>
-     is finished, because it is no longer necessary.
+     partition constraint. Without the <literal>CHECK</literal> constraint,
+     the table will be scanned to validate the partition constraint while
+     holding an <literal>ACCESS EXCLUSIVE</literal> lock on that partition
+     and a <literal>SHARE UPDATE EXCLUSIVE</literal> lock on the parent table.
+     It may be desired to drop the redundant <literal>CHECK</literal> constraint
+     after <command>ATTACH PARTITION</command> is finished.
+    </para>
+
+    <para>
+     As explained above, it is possible to create indexes on partitioned tables
+     and they are applied automatically to the entire hierarchy.  This is very
+     convenient, as not only the existing partitions will become indexed, but
+     also any partitions that are created in the future will.  One limitation is
+     that it's not possible to use the <literal>CONCURRENTLY</literal>
+     qualifier when creating such a partitioned index.  To overcome long lock
+     times, it is possible to use <command>CREATE INDEX ON ONLY</command>
+     the partitioned table; such an index is marked invalid, and the partitions
+     do not get the index applied automatically.  The indexes on partitions can
+     be created separately using <literal>CONCURRENTLY</literal>, and later
+     <firstterm>attached</firstterm> to the index on the parent using
+     <command>ALTER INDEX .. ATTACH PARTITION</command>.  Once indexes for all
+     partitions are attached to the parent index, the parent index is marked
+     valid automatically.  Example:
+<programlisting>
+CREATE INDEX measurement_usls_idx ON ONLY measurement (unitsales);
+
+CREATE INDEX measurement_usls_200602_idx
+    ON measurement_y2006m02 (unitsales);
+ALTER INDEX measurement_usls_idx
+    ATTACH PARTITION measurement_usls_200602_idx;
+...
+</programlisting>
+
+     This technique can be used with <literal>UNIQUE</literal> and
+     <literal>PRIMARY KEY</literal> constraints too; the indexes are created
+     implicitly when the constraint is created.  Example:
+<programlisting>
+ALTER TABLE ONLY measurement ADD UNIQUE (city_id, logdate);
+
+ALTER TABLE measurement_y2006m02 ADD UNIQUE (city_id, logdate);
+ALTER INDEX measurement_city_id_logdate_key
+    ATTACH PARTITION measurement_y2006m02_city_id_logdate_key;
+...
+</programlisting>
     </para>
    </sect3>
 
@@ -3314,37 +4056,27 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
 
      <listitem>
       <para>
-       While primary keys are supported on partitioned tables, foreign
-       keys referencing partitioned tables are not supported, nor are foreign
-       key references from a partitioned table to some other table.
+       Unique constraints on partitioned tables must include all the
+       partition key columns.  This limitation exists because
+       <productname>PostgreSQL</productname> can only enforce
+       uniqueness in each partition individually.
       </para>
      </listitem>
 
      <listitem>
       <para>
-       When an <command>UPDATE</command> causes a row to move from one
-       partition to another, there is a chance that another concurrent
-       <command>UPDATE</command> or <command>DELETE</command> misses this row.
-       Suppose session 1 is performing an <command>UPDATE</command> on a
-       partition key, and meanwhile a concurrent session 2 for which this row
-       is visible performs an <command>UPDATE</command> or
-       <command>DELETE</command> operation on this row. Session 2 can silently
-       miss the row if the row is deleted from the partition due to session
-       1's activity.  In such case, session 2's
-       <command>UPDATE</command> or <command>DELETE</command>, being unaware of
-       the row movement thinks that the row has just been deleted and concludes
-       that there is nothing to be done for this row. In the usual case where
-       the table is not partitioned, or where there is no row movement,
-       session 2 would have identified the newly updated row and carried out
-       the <command>UPDATE</command>/<command>DELETE</command> on this new row
-       version.
+       <literal>BEFORE ROW</literal> triggers, if necessary, must be defined
+       on individual partitions, not the partitioned table.
       </para>
      </listitem>
 
      <listitem>
       <para>
-       Row triggers, if necessary, must be defined on individual partitions,
-       not the partitioned table.
+       Mixing temporary and permanent relations in the same partition tree is
+       not allowed.  Hence, if the partitioned table is permanent, so must be
+       its partitions and likewise if the partitioned table is temporary.  When
+       using temporary relations, all members of the partition tree have to be
+       from the same session.
       </para>
      </listitem>
     </itemizedlist>
@@ -3358,15 +4090,15 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
      While the built-in declarative partitioning is suitable for most
      common use cases, there are some circumstances where a more flexible
      approach may be useful.  Partitioning can be implemented using table
-     inheritance, which allows for several features which are not supported
+     inheritance, which allows for several features not supported
      by declarative partitioning, such as:
 
      <itemizedlist>
       <listitem>
        <para>
-        Partitioning enforces a rule that all partitions must have exactly
-        the same set of columns as the parent, but table inheritance allows
-        children to have extra columns not present in the parent.
+        For declarative partitioning, partitions must have exactly the same set
+        of columns as the partitioned table, whereas with table inheritance,
+        child tables may have extra columns not present in the parent.
        </para>
       </listitem>
 
@@ -3381,16 +4113,16 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
         Declarative partitioning only supports range, list and hash
         partitioning, whereas table inheritance allows data to be divided in a
         manner of the user's choosing.  (Note, however, that if constraint
-        exclusion is unable to prune partitions effectively, query performance
-        will be very poor.)
+        exclusion is unable to prune child tables effectively, query performance
+        might be poor.)
        </para>
       </listitem>
 
       <listitem>
        <para>
         Some operations require a stronger lock when using declarative
-        partitioning than when using table inheritance.  For example, adding
-        or removing a partition to or from a partitioned table requires taking
+        partitioning than when using table inheritance.  For example,
+        removing a partition from a partitioned table requires taking
         an <literal>ACCESS EXCLUSIVE</literal> lock on the parent table,
         whereas a <literal>SHARE UPDATE EXCLUSIVE</literal> lock is enough
         in the case of regular inheritance.
@@ -3403,19 +4135,19 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
      <title>Example</title>
 
      <para>
-      We use the same <structname>measurement</structname> table we used
-      above.  To implement it as a partitioned table using inheritance, use
+      We use the non-partitioned <structname>measurement</structname>
+      table above.  To implement partitioning using inheritance, use
       the following steps:
 
       <orderedlist spacing="compact">
        <listitem>
         <para>
-         Create the <quote>master</quote> table, from which all of the
-         partitions will inherit.  This table will contain no data.  Do not
+         Create the <quote>root</quote> table, from which all of the
+         <quote>child</quote> tables will inherit.  This table will contain no data.  Do not
          define any check constraints on this table, unless you intend them
-         to be applied equally to all partitions.  There is no point in
+         to be applied equally to all child tables.  There is no point in
          defining any indexes or unique constraints on it, either.  For our
-         example, master table is the <structname>measurement</structname>
+         example, the root table is the <structname>measurement</structname>
          table as originally defined.
         </para>
        </listitem>
@@ -3423,9 +4155,9 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
        <listitem>
         <para>
          Create several <quote>child</quote> tables that each inherit from
-         the master table.  Normally, these tables will not add any columns
-         to the set inherited from the master.  Just as with declarative
-         partitioning, these partitions are in every way normal
+         the root table.  Normally, these tables will not add any columns
+         to the set inherited from the root.  Just as with declarative
+         partitioning, these tables are in every way normal
          <productname>PostgreSQL</productname> tables (or foreign tables).
         </para>
 
@@ -3443,8 +4175,8 @@ CREATE TABLE measurement_y2008m01 () INHERITS (measurement);
 
        <listitem>
         <para>
-         Add non-overlapping table constraints to the partition tables to
-         define the allowed key values in each partition.
+         Add non-overlapping table constraints to the child tables to
+         define the allowed key values in each.
         </para>
 
         <para>
@@ -3455,18 +4187,18 @@ CHECK ( county IN ( 'Oxfordshire', 'Buckinghamshire', 'Warwickshire' ))
 CHECK ( outletID &gt;= 100 AND outletID &lt; 200 )
 </programlisting>
          Ensure that the constraints guarantee that there is no overlap
-         between the key values permitted in different partitions.  A common
+         between the key values permitted in different child tables.  A common
          mistake is to set up range constraints like:
 <programlisting>
 CHECK ( outletID BETWEEN 100 AND 200 )
 CHECK ( outletID BETWEEN 200 AND 300 )
 </programlisting>
-         This is wrong since it is not clear which partition the key value
-         200 belongs in.
+         This is wrong since it is not clear which child table the key
+         value 200 belongs in.
         </para>
 
         <para>
-         It would be better to instead create partitions as follows:
+         It would be better to instead create child tables as follows:
 
 <programlisting>
 CREATE TABLE measurement_y2006m02 (
@@ -3495,7 +4227,7 @@ CREATE TABLE measurement_y2008m01 (
 
        <listitem>
         <para>
-         For each partition, create an index on the key column(s),
+         For each child table, create an index on the key column(s),
          as well as any other indexes you might want.
 <programlisting>
 CREATE INDEX measurement_y2006m02_logdate ON measurement_y2006m02 (logdate);
@@ -3511,9 +4243,9 @@ CREATE INDEX measurement_y2008m01_logdate ON measurement_y2008m01 (logdate);
         <para>
          We want our application to be able to say <literal>INSERT INTO
          measurement ...</literal> and have the data be redirected into the
-         appropriate partition table.  We can arrange that by attaching
-         a suitable trigger function to the master table.
-         If data will be added only to the latest partition, we can
+         appropriate child table.  We can arrange that by attaching
+         a suitable trigger function to the root table.
+         If data will be added only to the latest child, we can
          use a very simple trigger function:
 
 <programlisting>
@@ -3535,17 +4267,17 @@ LANGUAGE plpgsql;
 <programlisting>
 CREATE TRIGGER insert_measurement_trigger
     BEFORE INSERT ON measurement
-    FOR EACH ROW EXECUTE PROCEDURE measurement_insert_trigger();
+    FOR EACH ROW EXECUTE FUNCTION measurement_insert_trigger();
 </programlisting>
 
          We must redefine the trigger function each month so that it always
-         points to the current partition.  The trigger definition does
+         points to the current child table.  The trigger definition does
          not need to be updated, however.
         </para>
 
         <para>
          We might want to insert data and have the server automatically
-         locate the partition into which the row should be added. We
+         locate the child table into which the row should be added. We
          could do this with a more complex trigger function, for example:
 
 <programlisting>
@@ -3573,7 +4305,7 @@ LANGUAGE plpgsql;
 
          The trigger definition is the same as before.
          Note that each <literal>IF</literal> test must exactly match the
-         <literal>CHECK</literal> constraint for its partition.
+         <literal>CHECK</literal> constraint for its child table.
         </para>
 
         <para>
@@ -3584,8 +4316,8 @@ LANGUAGE plpgsql;
 
         <note>
          <para>
-          In practice it might be best to check the newest partition first,
-          if most inserts go into that partition.  For simplicity we have
+          In practice, it might be best to check the newest child first,
+          if most inserts go into that child.  For simplicity, we have
           shown the trigger's tests in the same order as in other parts
           of this example.
          </para>
@@ -3593,8 +4325,8 @@ LANGUAGE plpgsql;
 
         <para>
          A different approach to redirecting inserts into the appropriate
-         partition table is to set up rules, instead of a trigger, on the
-         master table.  For example:
+         child table is to set up rules, instead of a trigger, on the
+         root table.  For example:
 
 <programlisting>
 CREATE RULE measurement_insert_y2006m02 AS
@@ -3619,7 +4351,7 @@ DO INSTEAD
         <para>
          Be aware that <command>COPY</command> ignores rules.  If you want to
          use <command>COPY</command> to insert data, you'll need to copy into the
-         correct partition table rather than into the master. <command>COPY</command>
+         correct child table rather than directly into the root. <command>COPY</command>
          does fire triggers, so you can use it normally if you use the trigger
          approach.
         </para>
@@ -3627,7 +4359,7 @@ DO INSTEAD
         <para>
          Another disadvantage of the rule approach is that there is no simple
          way to force an error if the set of rules doesn't cover the insertion
-         date; the data will silently go into the master table instead.
+         date; the data will silently go into the root table instead.
         </para>
        </listitem>
 
@@ -3635,25 +4367,25 @@ DO INSTEAD
         <para>
          Ensure that the <xref linkend="guc-constraint-exclusion"/>
          configuration parameter is not disabled in
-         <filename>postgresql.conf</filename>.
-         If it is, queries will not be optimized as desired.
+         <filename>postgresql.conf</filename>; otherwise
+         child tables may be accessed unnecessarily.
         </para>
        </listitem>
       </orderedlist>
      </para>
 
      <para>
-      As we can see, a complex partitioning scheme could require a
+      As we can see, a complex table hierarchy could require a
       substantial amount of DDL.  In the above example we would be creating
-      a new partition each month, so it might be wise to write a script that
+      a new child table each month, so it might be wise to write a script that
       generates the required DDL automatically.
      </para>
     </sect3>
 
     <sect3 id="ddl-partitioning-inheritance-maintenance">
-     <title>Partition Maintenance</title>
+     <title>Maintenance for Inheritance Partitioning</title>
      <para>
-      To remove old data quickly, simply drop the partition that is no longer
+      To remove old data quickly, simply drop the child table that is no longer
       necessary:
 <programlisting>
 DROP TABLE measurement_y2006m02;
@@ -3661,7 +4393,7 @@ DROP TABLE measurement_y2006m02;
      </para>
 
     <para>
-     To remove the partition from the partitioned table but retain access to
+     To remove the child table from the inheritance hierarchy table but retain access to
      it as a table in its own right:
 
 <programlisting>
@@ -3670,8 +4402,8 @@ ALTER TABLE measurement_y2006m02 NO INHERIT measurement;
     </para>
 
     <para>
-     To add a new partition to handle new data, create an empty partition
-     just as the original partitions were created above:
+     To add a new child table to handle new data, create an empty child table
+     just as the original children were created above:
 
 <programlisting>
 CREATE TABLE measurement_y2008m02 (
@@ -3679,9 +4411,10 @@ CREATE TABLE measurement_y2008m02 (
 ) INHERITS (measurement);
 </programlisting>
 
-     Alternatively, one may want to create the new table outside the partition
-     structure, and make it a partition after the data is loaded, checked,
-     and transformed.
+     Alternatively, one may want to create and populate the new child table
+     before adding it to the table hierarchy.  This could allow data to be
+     loaded, checked, and transformed before being made visible to queries on
+     the parent table.
 
 <programlisting>
 CREATE TABLE measurement_y2008m02
@@ -3699,7 +4432,7 @@ ALTER TABLE measurement_y2008m02 INHERIT measurement;
     <title>Caveats</title>
 
     <para>
-     The following caveats apply to partitioned tables implemented using
+     The following caveats apply to partitioning implemented using
      inheritance:
      <itemizedlist>
       <listitem>
@@ -3707,19 +4440,27 @@ ALTER TABLE measurement_y2008m02 INHERIT measurement;
         There is no automatic way to verify that all of the
         <literal>CHECK</literal> constraints are mutually
         exclusive.  It is safer to create code that generates
-        partitions and creates and/or modifies associated objects than
+        child tables and creates and/or modifies associated objects than
         to write each by hand.
        </para>
       </listitem>
 
       <listitem>
        <para>
-        The schemes shown here assume that the partition key column(s)
-        of a row never change, or at least do not change enough to require
-        it to move to another partition.  An <command>UPDATE</command> that attempts
+        Indexes and foreign key constraints apply to single tables and not
+        to their inheritance children, hence they have some
+        <link linkend="ddl-inherit-caveats">caveats</link> to be aware of.
+       </para>
+      </listitem>
+
+      <listitem>
+       <para>
+        The schemes shown here assume that the values of a row's key column(s)
+        never change, or at least do not change enough to require it to move to another partition.
+        An <command>UPDATE</command> that attempts
         to do that will fail because of the <literal>CHECK</literal> constraints.
         If you need to handle such cases, you can put suitable update triggers
-        on the partition tables, but it makes management of the structure
+        on the child tables, but it makes management of the structure
         much more complicated.
        </para>
       </listitem>
@@ -3728,11 +4469,11 @@ ALTER TABLE measurement_y2008m02 INHERIT measurement;
        <para>
         If you are using manual <command>VACUUM</command> or
         <command>ANALYZE</command> commands, don't forget that
-        you need to run them on each partition individually. A command like:
+        you need to run them on each child table individually. A command like:
 <programlisting>
 ANALYZE measurement;
 </programlisting>
-        will only process the master table.
+        will only process the root table.
        </para>
       </listitem>
 
@@ -3748,7 +4489,7 @@ ANALYZE measurement;
       <listitem>
        <para>
         Triggers or rules will be needed to route rows to the desired
-        partition, unless the application is explicitly aware of the
+        child table, unless the application is explicitly aware of the
         partitioning scheme.  Triggers may be complicated to write, and will
         be much slower than the tuple routing performed internally by
         declarative partitioning.
@@ -3759,6 +4500,148 @@ ANALYZE measurement;
    </sect3>
   </sect2>
 
+  <sect2 id="ddl-partition-pruning">
+   <title>Partition Pruning</title>
+
+   <indexterm>
+    <primary>partition pruning</primary>
+   </indexterm>
+
+   <para>
+    <firstterm>Partition pruning</firstterm> is a query optimization technique
+    that improves performance for declaratively partitioned tables.
+    As an example:
+
+<programlisting>
+SET enable_partition_pruning = on;                 -- the default
+SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
+</programlisting>
+
+    Without partition pruning, the above query would scan each of the
+    partitions of the <structname>measurement</structname> table. With
+    partition pruning enabled, the planner will examine the definition
+    of each partition and prove that the partition need not
+    be scanned because it could not contain any rows meeting the query's
+    <literal>WHERE</literal> clause.  When the planner can prove this, it
+    excludes (<firstterm>prunes</firstterm>) the partition from the query
+    plan.
+   </para>
+
+   <para>
+    By using the EXPLAIN command and the <xref
+    linkend="guc-enable-partition-pruning"/> configuration parameter, it's
+    possible to show the difference between a plan for which partitions have
+    been pruned and one for which they have not.  A typical unoptimized
+    plan for this type of table setup is:
+<programlisting>
+SET enable_partition_pruning = off;
+EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
+                                    QUERY PLAN
+-------------------------------------------------------------------&zwsp;----------------
+ Aggregate  (cost=188.76..188.77 rows=1 width=8)
+   -&gt;  Append  (cost=0.00..181.05 rows=3085 width=0)
+         -&gt;  Seq Scan on measurement_y2006m02  (cost=0.00..33.12 rows=617 width=0)
+               Filter: (logdate &gt;= '2008-01-01'::date)
+         -&gt;  Seq Scan on measurement_y2006m03  (cost=0.00..33.12 rows=617 width=0)
+               Filter: (logdate &gt;= '2008-01-01'::date)
+...
+         -&gt;  Seq Scan on measurement_y2007m11  (cost=0.00..33.12 rows=617 width=0)
+               Filter: (logdate &gt;= '2008-01-01'::date)
+         -&gt;  Seq Scan on measurement_y2007m12  (cost=0.00..33.12 rows=617 width=0)
+               Filter: (logdate &gt;= '2008-01-01'::date)
+         -&gt;  Seq Scan on measurement_y2008m01  (cost=0.00..33.12 rows=617 width=0)
+               Filter: (logdate &gt;= '2008-01-01'::date)
+</programlisting>
+
+    Some or all of the partitions might use index scans instead of
+    full-table sequential scans, but the point here is that there
+    is no need to scan the older partitions at all to answer this query.
+    When we enable partition pruning, we get a significantly
+    cheaper plan that will deliver the same answer:
+<programlisting>
+SET enable_partition_pruning = on;
+EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
+                                    QUERY PLAN
+-------------------------------------------------------------------&zwsp;----------------
+ Aggregate  (cost=37.75..37.76 rows=1 width=8)
+   -&gt;  Seq Scan on measurement_y2008m01  (cost=0.00..33.12 rows=617 width=0)
+         Filter: (logdate &gt;= '2008-01-01'::date)
+</programlisting>
+   </para>
+
+   <para>
+    Note that partition pruning is driven only by the constraints defined
+    implicitly by the partition keys, not by the presence of indexes.
+    Therefore it isn't necessary to define indexes on the key columns.
+    Whether an index needs to be created for a given partition depends on
+    whether you expect that queries that scan the partition will
+    generally scan a large part of the partition or just a small part.
+    An index will be helpful in the latter case but not the former.
+   </para>
+
+   <para>
+    Partition pruning can be performed not only during the planning of a
+    given query, but also during its execution.  This is useful as it can
+    allow more partitions to be pruned when clauses contain expressions
+    whose values are not known at query planning time, for example,
+    parameters defined in a <command>PREPARE</command> statement, using a
+    value obtained from a subquery, or using a parameterized value on the
+    inner side of a nested loop join.  Partition pruning during execution
+    can be performed at any of the following times:
+
+    <itemizedlist>
+     <listitem>
+      <para>
+       During initialization of the query plan.  Partition pruning can be
+       performed here for parameter values which are known during the
+       initialization phase of execution.  Partitions which are pruned
+       during this stage will not show up in the query's
+       <command>EXPLAIN</command> or <command>EXPLAIN ANALYZE</command>.
+       It is possible to determine the number of partitions which were
+       removed during this phase by observing the
+       <quote>Subplans Removed</quote> property in the
+       <command>EXPLAIN</command> output.
+      </para>
+     </listitem>
+
+     <listitem>
+      <para>
+       During actual execution of the query plan.  Partition pruning may
+       also be performed here to remove partitions using values which are
+       only known during actual query execution.  This includes values
+       from subqueries and values from execution-time parameters such as
+       those from parameterized nested loop joins.  Since the value of
+       these parameters may change many times during the execution of the
+       query, partition pruning is performed whenever one of the
+       execution parameters being used by partition pruning changes.
+       Determining if partitions were pruned during this phase requires
+       careful inspection of the <literal>loops</literal> property in
+       the <command>EXPLAIN ANALYZE</command> output.  Subplans
+       corresponding to different partitions may have different values
+       for it depending on how many times each of them was pruned during
+       execution.  Some may be shown as <literal>(never executed)</literal>
+       if they were pruned every time.
+      </para>
+     </listitem>
+    </itemizedlist>
+   </para>
+
+   <para>
+    Partition pruning can be disabled using the
+    <xref linkend="guc-enable-partition-pruning"/> setting.
+   </para>
+
+   <note>
+    <para>
+     Execution-time partition pruning currently only occurs for the
+     <literal>Append</literal> and <literal>MergeAppend</literal> node types.
+     It is not yet implemented for the <literal>ModifyTable</literal> node
+     type, but that is likely to be changed in a future release of
+     <productname>PostgreSQL</productname>.
+    </para>
+   </note>
+  </sect2>
+
   <sect2 id="ddl-partitioning-constraint-exclusion">
    <title>Partitioning and Constraint Exclusion</title>
 
@@ -3767,104 +4650,60 @@ ANALYZE measurement;
    </indexterm>
 
    <para>
-    <firstterm>Constraint exclusion</firstterm> is a query optimization technique
-    that improves performance for partitioned tables defined in the
-    fashion described above (both declaratively partitioned tables and those
-    implemented using inheritance).  As an example:
-
-<programlisting>
-SET constraint_exclusion = on;
-SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
-</programlisting>
-
-    Without constraint exclusion, the above query would scan each of
-    the partitions of the <structname>measurement</structname> table. With constraint
-    exclusion enabled, the planner will examine the constraints of each
-    partition and try to prove that the partition need not
-    be scanned because it could not contain any rows meeting the query's
-    <literal>WHERE</literal> clause.  When the planner can prove this, it
-    excludes the partition from the query plan.
+    <firstterm>Constraint exclusion</firstterm> is a query optimization
+    technique similar to partition pruning.  While it is primarily used
+    for partitioning implemented using the legacy inheritance method, it can be
+    used for other purposes, including with declarative partitioning.
    </para>
 
    <para>
-    You can use the <command>EXPLAIN</command> command to show the difference
-    between a plan with <varname>constraint_exclusion</varname> on and a plan
-    with it off.  A typical unoptimized plan for this type of table setup is:
-
-<programlisting>
-SET constraint_exclusion = off;
-EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
-
-                                          QUERY PLAN
------------------------------------------------------------------------------------------------
- Aggregate  (cost=158.66..158.68 rows=1 width=0)
-   -&gt;  Append  (cost=0.00..151.88 rows=2715 width=0)
-         -&gt;  Seq Scan on measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-         -&gt;  Seq Scan on measurement_y2006m02 measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-         -&gt;  Seq Scan on measurement_y2006m03 measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-...
-         -&gt;  Seq Scan on measurement_y2007m12 measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-         -&gt;  Seq Scan on measurement_y2008m01 measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-</programlisting>
-
-    Some or all of the partitions might use index scans instead of
-    full-table sequential scans, but the point here is that there
-    is no need to scan the older partitions at all to answer this query.
-    When we enable constraint exclusion, we get a significantly
-    cheaper plan that will deliver the same answer:
-
-<programlisting>
-SET constraint_exclusion = on;
-EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
-                                          QUERY PLAN
------------------------------------------------------------------------------------------------
- Aggregate  (cost=63.47..63.48 rows=1 width=0)
-   -&gt;  Append  (cost=0.00..60.75 rows=1086 width=0)
-         -&gt;  Seq Scan on measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-         -&gt;  Seq Scan on measurement_y2008m01 measurement  (cost=0.00..30.38 rows=543 width=0)
-               Filter: (logdate &gt;= '2008-01-01'::date)
-</programlisting>
+    Constraint exclusion works in a very similar way to partition
+    pruning, except that it uses each table's <literal>CHECK</literal>
+    constraints &mdash; which gives it its name &mdash; whereas partition
+    pruning uses the table's partition bounds, which exist only in the
+    case of declarative partitioning.  Another difference is that
+    constraint exclusion is only applied at plan time; there is no attempt
+    to remove partitions at execution time.
    </para>
 
    <para>
-    Note that constraint exclusion is driven only by <literal>CHECK</literal>
-    constraints, not by the presence of indexes.  Therefore it isn't
-    necessary to define indexes on the key columns.  Whether an index
-    needs to be created for a given partition depends on whether you
-    expect that queries that scan the partition will generally scan
-    a large part of the partition or just a small part.  An index will
-    be helpful in the latter case but not the former.
+    The fact that constraint exclusion uses <literal>CHECK</literal>
+    constraints, which makes it slow compared to partition pruning, can
+    sometimes be used as an advantage: because constraints can be defined
+    even on declaratively-partitioned tables, in addition to their internal
+    partition bounds, constraint exclusion may be able
+    to elide additional partitions from the query plan.
    </para>
 
    <para>
     The default (and recommended) setting of
-    <xref linkend="guc-constraint-exclusion"/> is actually neither
+    <xref linkend="guc-constraint-exclusion"/> is neither
     <literal>on</literal> nor <literal>off</literal>, but an intermediate setting
     called <literal>partition</literal>, which causes the technique to be
-    applied only to queries that are likely to be working on partitioned
+    applied only to queries that are likely to be working on inheritance partitioned
     tables.  The <literal>on</literal> setting causes the planner to examine
     <literal>CHECK</literal> constraints in all queries, even simple ones that
     are unlikely to benefit.
    </para>
 
    <para>
-    The following caveats apply to constraint exclusion, which is used by
-    both inheritance and partitioned tables:
+    The following caveats apply to constraint exclusion:
 
    <itemizedlist>
+    <listitem>
+     <para>
+      Constraint exclusion is only applied during query planning, unlike
+      partition pruning, which can also be applied during query execution.
+     </para>
+    </listitem>
+
     <listitem>
      <para>
       Constraint exclusion only works when the query's <literal>WHERE</literal>
       clause contains constants (or externally supplied parameters).
       For example, a comparison against a non-immutable function such as
       <function>CURRENT_TIMESTAMP</function> cannot be optimized, since the
-      planner cannot know which partition the function value might fall
+      planner cannot know which child table the function's value might fall
       into at run time.
      </para>
     </listitem>
@@ -3872,32 +4711,110 @@ EXPLAIN SELECT count(*) FROM measurement WHERE logdate &gt;= DATE '2008-01-01';
     <listitem>
      <para>
       Keep the partitioning constraints simple, else the planner may not be
-      able to prove that partitions don't need to be visited.  Use simple
+      able to prove that child tables might not need to be visited.  Use simple
       equality conditions for list partitioning, or simple
       range tests for range partitioning, as illustrated in the preceding
       examples.  A good rule of thumb is that partitioning constraints should
       contain only comparisons of the partitioning column(s) to constants
-      using B-tree-indexable operators, which applies even to partitioned
-      tables, because only B-tree-indexable column(s) are allowed in the
-      partition key.  (This is not a problem when using declarative
-      partitioning, since the automatically generated constraints are simple
-      enough to be understood by the planner.)
+      using B-tree-indexable operators, because only B-tree-indexable
+      column(s) are allowed in the partition key.
      </para>
     </listitem>
 
     <listitem>
      <para>
-      All constraints on all partitions of the master table are examined
-      during constraint exclusion, so large numbers of partitions are likely
-      to increase query planning time considerably.  Partitioning using
-      these techniques will work well with up to perhaps a hundred partitions;
-      don't try to use many thousands of partitions.
+      All constraints on all children of the parent table are examined
+      during constraint exclusion, so large numbers of children are likely
+      to increase query planning time considerably.  So the legacy
+      inheritance based partitioning will work well with up to perhaps a
+      hundred child tables; don't try to use many thousands of children.
      </para>
     </listitem>
 
    </itemizedlist>
    </para>
   </sect2>
+
+  <sect2 id="ddl-partitioning-declarative-best-practices">
+   <title>Declarative Partitioning Best Practices</title>
+
+   <para>
+    The choice of how to partition a table should be made carefully as the
+    performance of query planning and execution can be negatively affected by
+    poor design.
+   </para>
+
+   <para>
+    One of the most critical design decisions will be the column or columns
+    by which you partition your data.  Often the best choice will be to
+    partition by the column or set of columns which most commonly appear in
+    <literal>WHERE</literal> clauses of queries being executed on the
+    partitioned table.  <literal>WHERE</literal> clause items that match and
+    are compatible with the partition key can be used to prune unneeded
+    partitions.  However, you may be forced into making other decisions by
+    requirements for the <literal>PRIMARY KEY</literal> or a
+    <literal>UNIQUE</literal> constraint.  Removal of unwanted data is also a
+    factor to consider when planning your partitioning strategy.  An entire
+    partition can be detached fairly quickly, so it may be beneficial to
+    design the partition strategy in such a way that all data to be removed
+    at once is located in a single partition.
+   </para>
+
+   <para>
+    Choosing the target number of partitions that the table should be divided
+    into is also a critical decision to make.  Not having enough partitions
+    may mean that indexes remain too large and that data locality remains poor
+    which could result in low cache hit ratios.  However, dividing the table
+    into too many partitions can also cause issues.  Too many partitions can
+    mean longer query planning times and higher memory consumption during both
+    query planning and execution.  When choosing how to partition your table,
+    it's also important to consider what changes may occur in the future.  For
+    example, if you choose to have one partition per customer and you
+    currently have a small number of large customers, consider the
+    implications if in several years you instead find yourself with a large
+    number of small customers.  In this case, it may be better to choose to
+    partition by <literal>HASH</literal> and choose a reasonable number of
+    partitions rather than trying to partition by <literal>LIST</literal> and
+    hoping that the number of customers does not increase beyond what it is
+    practical to partition the data by.
+   </para>
+
+   <para>
+    Sub-partitioning can be useful to further divide partitions that are
+    expected to become larger than other partitions, although excessive
+    sub-partitioning can easily lead to large numbers of partitions and can
+    cause the same problems mentioned in the preceding paragraph.
+   </para>
+
+   <para>
+    It is also important to consider the overhead of partitioning during
+    query planning and execution.  The query planner is generally able to
+    handle partition hierarchies with up to a few thousand partitions fairly
+    well, provided that typical queries allow the query planner to prune all
+    but a small number of partitions.  Planning times become longer and memory
+    consumption becomes higher when more partitions remain after the planner
+    performs partition pruning.  This is particularly true for the
+    <command>UPDATE</command> and <command>DELETE</command> commands.  Another
+    reason to be concerned about having a large number of partitions is that
+    the server's memory consumption may grow significantly over a period of
+    time, especially if many sessions touch large numbers of partitions.
+    That's because each partition requires its metadata to be loaded into the
+    local memory of each session that touches it.
+   </para>
+
+   <para>
+    With data warehouse type workloads, it can make sense to use a larger
+    number of partitions than with an <acronym>OLTP</acronym> type workload.
+    Generally, in data warehouses, query planning time is less of a concern as
+    the majority of processing time is spent during query execution.  With
+    either of these two types of workload, it is important to make the right
+    decisions early, as re-partitioning large quantities of data can be
+    painfully slow.  Simulations of the intended workload are often beneficial
+    for optimizing the partitioning strategy.  Never assume that more
+    partitions are better than fewer partitions and vice-versa.
+   </para>
+  </sect2>
+
  </sect1>
 
  <sect1 id="ddl-foreign-data">

@@ -27,7 +27,7 @@
  * the backend's "backend/libpq" is quite separate from "interfaces/libpq".
  * All that remains is similarities of names to trap the unwary...
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/libpq/pqcomm.c
@@ -44,8 +44,8 @@
  *		StreamClose			- Close a client/backend connection
  *		TouchSocketFiles	- Protect socket files against /tmp cleaners
  *		pq_init			- initialize libpq at backend startup
- *		pq_comm_reset	- reset libpq during error recovery
- *		pq_close		- shutdown libpq at backend exit
+ *		socket_comm_reset	- reset libpq during error recovery
+ *		socket_close		- shutdown libpq at backend exit
  *
  * low-level I/O:
  *		pq_getbytes		- get a known number of bytes from connection
@@ -81,9 +81,7 @@
 #ifdef HAVE_NETINET_TCP_H
 #include <netinet/tcp.h>
 #endif
-#ifdef HAVE_UTIME_H
 #include <utime.h>
-#endif
 #ifdef _MSC_VER					/* mstcpip.h is missing on mingw */
 #include <mstcpip.h>
 #endif
@@ -166,11 +164,11 @@ static int	internal_putbytes(const char *s, size_t len);
 static int	internal_flush(void);
 
 #ifdef HAVE_UNIX_SOCKETS
-static int	Lock_AF_UNIX(char *unixSocketDir, char *unixSocketPath);
-static int	Setup_AF_UNIX(char *sock_path);
+static int	Lock_AF_UNIX(const char *unixSocketDir, const char *unixSocketPath);
+static int	Setup_AF_UNIX(const char *sock_path);
 #endif							/* HAVE_UNIX_SOCKETS */
 
-static PQcommMethods PqCommSocketMethods = {
+static const PQcommMethods PqCommSocketMethods = {
 	socket_comm_reset,
 	socket_flush,
 	socket_flush_if_writable,
@@ -181,7 +179,7 @@ static PQcommMethods PqCommSocketMethods = {
 	socket_endcopyout
 };
 
-PQcommMethods *PqCommMethods = &PqCommSocketMethods;
+const PQcommMethods *PqCommMethods = &PqCommSocketMethods;
 
 WaitEventSet *FeBeWaitSet;
 
@@ -327,8 +325,8 @@ socket_close(int code, Datum arg)
  */
 
 int
-StreamServerPort(int family, char *hostName, unsigned short portNumber,
-				 char *unixSocketDir,
+StreamServerPort(int family, const char *hostName, unsigned short portNumber,
+				 const char *unixSocketDir,
 				 pgsocket ListenSocket[], int MaxListen)
 {
 	pgsocket	fd;
@@ -485,10 +483,10 @@ StreamServerPort(int family, char *hostName, unsigned short portNumber,
 		 * error on TCP ports.
 		 *
 		 * On win32, however, this behavior only happens if the
-		 * SO_EXLUSIVEADDRUSE is set. With SO_REUSEADDR, win32 allows multiple
-		 * servers to listen on the same address, resulting in unpredictable
-		 * behavior. With no flags at all, win32 behaves as Unix with
-		 * SO_REUSEADDR.
+		 * SO_EXCLUSIVEADDRUSE is set. With SO_REUSEADDR, win32 allows
+		 * multiple servers to listen on the same address, resulting in
+		 * unpredictable behavior. With no flags at all, win32 behaves as Unix
+		 * with SO_REUSEADDR.
 		 */
 		if (!IS_AF_UNIX(addr->ai_family))
 		{
@@ -611,7 +609,7 @@ StreamServerPort(int family, char *hostName, unsigned short portNumber,
  * Lock_AF_UNIX -- configure unix socket file path
  */
 static int
-Lock_AF_UNIX(char *unixSocketDir, char *unixSocketPath)
+Lock_AF_UNIX(const char *unixSocketDir, const char *unixSocketPath)
 {
 	/*
 	 * Grab an interlock file associated with the socket file.
@@ -642,7 +640,7 @@ Lock_AF_UNIX(char *unixSocketDir, char *unixSocketPath)
  * Setup_AF_UNIX -- configure unix socket permissions
  */
 static int
-Setup_AF_UNIX(char *sock_path)
+Setup_AF_UNIX(const char *sock_path)
 {
 	/*
 	 * Fix socket ownership/permission if requested.  Note we must do this
@@ -707,8 +705,8 @@ Setup_AF_UNIX(char *sock_path)
  *		server port.  Set port->sock to the FD of the new connection.
  *
  * ASSUME: that this doesn't need to be non-blocking because
- *		the Postmaster uses select() to tell when the server master
- *		socket is ready for accept().
+ *		the Postmaster uses select() to tell when the socket is ready for
+ *		accept().
  *
  * RETURNS: STATUS_OK or STATUS_ERROR
  */
@@ -825,6 +823,7 @@ StreamConnection(pgsocket server_fd, Port *port)
 		(void) pq_setkeepalivesidle(tcp_keepalives_idle, port);
 		(void) pq_setkeepalivesinterval(tcp_keepalives_interval, port);
 		(void) pq_setkeepalivescount(tcp_keepalives_count, port);
+		(void) pq_settcpusertimeout(tcp_user_timeout, port);
 	}
 
 	return STATUS_OK;
@@ -865,20 +864,8 @@ TouchSocketFiles(void)
 	{
 		char	   *sock_path = (char *) lfirst(l);
 
-		/*
-		 * utime() is POSIX standard, utimes() is a common alternative. If we
-		 * have neither, there's no way to affect the mod or access time of
-		 * the socket :-(
-		 *
-		 * In either path, we ignore errors; there's no point in complaining.
-		 */
-#ifdef HAVE_UTIME
-		utime(sock_path, NULL);
-#else							/* !HAVE_UTIME */
-#ifdef HAVE_UTIMES
-		utimes(sock_path, NULL);
-#endif							/* HAVE_UTIMES */
-#endif							/* HAVE_UTIME */
+		/* Ignore errors; there's no point in complaining */
+		(void) utime(sock_path, NULL);
 	}
 }
 
@@ -1920,6 +1907,78 @@ pq_setkeepalivescount(int count, Port *port)
 	if (count != 0)
 	{
 		elog(LOG, "setsockopt(%s) not supported", "TCP_KEEPCNT");
+		return STATUS_ERROR;
+	}
+#endif
+
+	return STATUS_OK;
+}
+
+int
+pq_gettcpusertimeout(Port *port)
+{
+#ifdef TCP_USER_TIMEOUT
+	if (port == NULL || IS_AF_UNIX(port->laddr.addr.ss_family))
+		return 0;
+
+	if (port->tcp_user_timeout != 0)
+		return port->tcp_user_timeout;
+
+	if (port->default_tcp_user_timeout == 0)
+	{
+		ACCEPT_TYPE_ARG3 size = sizeof(port->default_tcp_user_timeout);
+
+		if (getsockopt(port->sock, IPPROTO_TCP, TCP_USER_TIMEOUT,
+					   (char *) &port->default_tcp_user_timeout,
+					   &size) < 0)
+		{
+			elog(LOG, "getsockopt(%s) failed: %m", "TCP_USER_TIMEOUT");
+			port->default_tcp_user_timeout = -1;	/* don't know */
+		}
+	}
+
+	return port->default_tcp_user_timeout;
+#else
+	return 0;
+#endif
+}
+
+int
+pq_settcpusertimeout(int timeout, Port *port)
+{
+	if (port == NULL || IS_AF_UNIX(port->laddr.addr.ss_family))
+		return STATUS_OK;
+
+#ifdef TCP_USER_TIMEOUT
+	if (timeout == port->tcp_user_timeout)
+		return STATUS_OK;
+
+	if (port->default_tcp_user_timeout <= 0)
+	{
+		if (pq_gettcpusertimeout(port) < 0)
+		{
+			if (timeout == 0)
+				return STATUS_OK;	/* default is set but unknown */
+			else
+				return STATUS_ERROR;
+		}
+	}
+
+	if (timeout == 0)
+		timeout = port->default_tcp_user_timeout;
+
+	if (setsockopt(port->sock, IPPROTO_TCP, TCP_USER_TIMEOUT,
+				   (char *) &timeout, sizeof(timeout)) < 0)
+	{
+		elog(LOG, "setsockopt(%s) failed: %m", "TCP_USER_TIMEOUT");
+		return STATUS_ERROR;
+	}
+
+	port->tcp_user_timeout = timeout;
+#else
+	if (timeout != 0)
+	{
+		elog(LOG, "setsockopt(%s) not supported", "TCP_USER_TIMEOUT");
 		return STATUS_ERROR;
 	}
 #endif

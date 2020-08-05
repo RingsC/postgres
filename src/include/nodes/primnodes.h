@@ -7,7 +7,7 @@
  *	  and join trees.
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/primnodes.h
@@ -18,7 +18,6 @@
 #define PRIMNODES_H
 
 #include "access/attnum.h"
-#include "access/stratnum.h"
 #include "nodes/bitmapset.h"
 #include "nodes/pg_list.h"
 
@@ -76,12 +75,15 @@ typedef struct RangeVar
 
 /*
  * TableFunc - node for a table function, such as XMLTABLE.
+ *
+ * Entries in the ns_names list are either string Value nodes containing
+ * literal namespace names, or NULL pointers to represent DEFAULT.
  */
 typedef struct TableFunc
 {
 	NodeTag		type;
-	List	   *ns_uris;		/* list of namespace uri */
-	List	   *ns_names;		/* list of namespace names */
+	List	   *ns_uris;		/* list of namespace URI expressions */
+	List	   *ns_names;		/* list of namespace names or NULL */
 	Node	   *docexpr;		/* input document expression */
 	Node	   *rowexpr;		/* row filter expression */
 	List	   *colnames;		/* column names (list of String) */
@@ -109,6 +111,7 @@ typedef struct IntoClause
 
 	RangeVar   *rel;			/* target relation name */
 	List	   *colNames;		/* column names to assign, or NIL */
+	char	   *accessMethod;	/* table access method */
 	List	   *options;		/* options from WITH clause */
 	OnCommitAction onCommit;	/* what do we do at COMMIT? */
 	char	   *tableSpaceName; /* table space to use, or NULL */
@@ -138,18 +141,32 @@ typedef struct Expr
 /*
  * Var - expression node representing a variable (ie, a table column)
  *
- * Note: during parsing/planning, varnoold/varoattno are always just copies
- * of varno/varattno.  At the tail end of planning, Var nodes appearing in
- * upper-level plan nodes are reassigned to point to the outputs of their
- * subplans; for example, in a join node varno becomes INNER_VAR or OUTER_VAR
- * and varattno becomes the index of the proper element of that subplan's
- * target list.  Similarly, INDEX_VAR is used to identify Vars that reference
- * an index column rather than a heap column.  (In ForeignScan and CustomScan
- * plan nodes, INDEX_VAR is abused to signify references to columns of a
- * custom scan tuple type.)  In all these cases, varnoold/varoattno hold the
- * original values.  The code doesn't really need varnoold/varoattno, but they
- * are very useful for debugging and interpreting completed plans, so we keep
- * them around.
+ * In the parser and planner, varno and varattno identify the semantic
+ * referent, which is a base-relation column unless the reference is to a join
+ * USING column that isn't semantically equivalent to either join input column
+ * (because it is a FULL join or the input column requires a type coercion).
+ * In those cases varno and varattno refer to the JOIN RTE.  (Early in the
+ * planner, we replace such join references by the implied expression; but up
+ * till then we want join reference Vars to keep their original identity for
+ * query-printing purposes.)
+ *
+ * At the end of planning, Var nodes appearing in upper-level plan nodes are
+ * reassigned to point to the outputs of their subplans; for example, in a
+ * join node varno becomes INNER_VAR or OUTER_VAR and varattno becomes the
+ * index of the proper element of that subplan's target list.  Similarly,
+ * INDEX_VAR is used to identify Vars that reference an index column rather
+ * than a heap column.  (In ForeignScan and CustomScan plan nodes, INDEX_VAR
+ * is abused to signify references to columns of a custom scan tuple type.)
+ *
+ * In the parser, varnosyn and varattnosyn are either identical to
+ * varno/varattno, or they specify the column's position in an aliased JOIN
+ * RTE that hides the semantic referent RTE's refname.  This is a syntactic
+ * identifier as opposed to the semantic identifier; it tells ruleutils.c
+ * how to print the Var properly.  varnosyn/varattnosyn retain their values
+ * throughout planning and execution, so they are particularly helpful to
+ * identify Vars when debugging.  Note, however, that a Var that is generated
+ * in the planner and doesn't correspond to any simple relation column may
+ * have varnosyn = varattnosyn = 0.
  */
 #define    INNER_VAR		65000	/* reference to inner subplan */
 #define    OUTER_VAR		65001	/* reference to outer subplan */
@@ -174,8 +191,8 @@ typedef struct Var
 	Index		varlevelsup;	/* for subquery variables referencing outer
 								 * relations; 0 in a normal var, >0 means N
 								 * levels up */
-	Index		varnoold;		/* original value of varno, for debugging */
-	AttrNumber	varoattno;		/* original value of varattno */
+	Index		varnosyn;		/* syntactic relation index (0 if unknown) */
+	AttrNumber	varattnosyn;	/* syntactic attribute number */
 	int			location;		/* token location, or -1 if unknown */
 } Var;
 
@@ -366,18 +383,19 @@ typedef struct WindowFunc
 } WindowFunc;
 
 /* ----------------
- *	ArrayRef: describes an array subscripting operation
+ *	SubscriptingRef: describes a subscripting operation over a container
+ *			(array, etc).
  *
- * An ArrayRef can describe fetching a single element from an array,
- * fetching a subarray (array slice), storing a single element into
- * an array, or storing a slice.  The "store" cases work with an
- * initial array value and a source value that is inserted into the
- * appropriate part of the array; the result of the operation is an
- * entire new modified array value.
+ * A SubscriptingRef can describe fetching a single element from a container,
+ * fetching a part of container (e.g. array slice), storing a single element into
+ * a container, or storing a slice.  The "store" cases work with an
+ * initial container value and a source value that is inserted into the
+ * appropriate part of the container; the result of the operation is an
+ * entire new modified container value.
  *
- * If reflowerindexpr = NIL, then we are fetching or storing a single array
- * element at the subscripts given by refupperindexpr.  Otherwise we are
- * fetching or storing an array slice, that is a rectangular subarray
+ * If reflowerindexpr = NIL, then we are fetching or storing a single container
+ * element at the subscripts given by refupperindexpr. Otherwise we are
+ * fetching or storing a container slice, that is a rectangular subcontainer
  * with lower and upper bounds given by the index expressions.
  * reflowerindexpr must be the same length as refupperindexpr when it
  * is not NIL.
@@ -389,28 +407,29 @@ typedef struct WindowFunc
  * element; but it is the array type when doing subarray fetch or either
  * type of store.
  *
- * Note: for the cases where an array is returned, if refexpr yields a R/W
- * expanded array, then the implementation is allowed to modify that object
+ * Note: for the cases where a container is returned, if refexpr yields a R/W
+ * expanded container, then the implementation is allowed to modify that object
  * in-place and return the same object.)
  * ----------------
  */
-typedef struct ArrayRef
+typedef struct SubscriptingRef
 {
 	Expr		xpr;
-	Oid			refarraytype;	/* type of the array proper */
-	Oid			refelemtype;	/* type of the array elements */
-	int32		reftypmod;		/* typmod of the array (and elements too) */
+	Oid			refcontainertype;	/* type of the container proper */
+	Oid			refelemtype;	/* type of the container elements */
+	int32		reftypmod;		/* typmod of the container (and elements too) */
 	Oid			refcollid;		/* OID of collation, or InvalidOid if none */
 	List	   *refupperindexpr;	/* expressions that evaluate to upper
-									 * array indexes */
+									 * container indexes */
 	List	   *reflowerindexpr;	/* expressions that evaluate to lower
-									 * array indexes, or NIL for single array
-									 * element */
-	Expr	   *refexpr;		/* the expression that evaluates to an array
-								 * value */
+									 * container indexes, or NIL for single
+									 * container element */
+	Expr	   *refexpr;		/* the expression that evaluates to a
+								 * container value */
+
 	Expr	   *refassgnexpr;	/* expression for the source value, or NULL if
 								 * fetch */
-} ArrayRef;
+} SubscriptingRef;
 
 /*
  * CoercionContext - distinguishes the allowed set of type casts
@@ -753,7 +772,7 @@ typedef struct FieldSelect
  *
  * FieldStore represents the operation of modifying one field in a tuple
  * value, yielding a new tuple value (the input is not touched!).  Like
- * the assign case of ArrayRef, this is used to implement UPDATE of a
+ * the assign case of SubscriptingRef, this is used to implement UPDATE of a
  * portion of a column.
  *
  * resulttype is always a named composite type (not a domain).  To update
@@ -932,8 +951,20 @@ typedef struct CaseWhen
  * This is effectively like a Param, but can be implemented more simply
  * since we need only one replacement value at a time.
  *
- * We also use this in nested UPDATE expressions.
- * See transformAssignmentIndirection().
+ * We also abuse this node type for some other purposes, including:
+ *	* Placeholder for the current array element value in ArrayCoerceExpr;
+ *	  see build_coercion_expression().
+ *	* Nested FieldStore/SubscriptingRef assignment expressions in INSERT/UPDATE;
+ *	  see transformAssignmentIndirection().
+ *
+ * The uses in CaseExpr and ArrayCoerceExpr are safe only to the extent that
+ * there is not any other CaseExpr or ArrayCoerceExpr between the value source
+ * node and its child CaseTestExpr(s).  This is true in the parse analysis
+ * output, but the planner's function-inlining logic has to be careful not to
+ * break it.
+ *
+ * The nested-assignment-expression case is safe because the only node types
+ * that can be above such CaseTestExprs are FieldStore and SubscriptingRef.
  */
 typedef struct CaseTestExpr
 {
@@ -1506,102 +1537,5 @@ typedef struct OnConflictExpr
 	int			exclRelIndex;	/* RT index of 'excluded' relation */
 	List	   *exclRelTlist;	/* tlist of the EXCLUDED pseudo relation */
 } OnConflictExpr;
-
-
-/*
- * Node types to represent a partition pruning step.
- */
-
-/*
- * The base Node type.  step_id is the global identifier of a given step
- * within a given pruning context.
- */
-typedef struct PartitionPruneStep
-{
-	NodeTag		type;
-	int			step_id;
-} PartitionPruneStep;
-
-/*----------
- * PartitionPruneStepOp - Information to prune using a set of mutually AND'd
- *							OpExpr clauses
- *
- * This contains information extracted from up to partnatts OpExpr clauses,
- * where partnatts is the number of partition key columns.  'opstrategy' is the
- * strategy of the operator in the clause matched to the last partition key.
- * 'exprs' contains expressions which comprise the lookup key to be passed to
- * the partition bound search function.  'cmpfns' contains the OIDs of
- * comparison function used to compare aforementioned expressions with
- * partition bounds.  Both 'exprs' and 'cmpfns' contain the same number of
- * items up to partnatts items.
- *
- * Once we find the offset of a partition bound using the lookup key, we
- * determine which partitions to include in the result based on the value of
- * 'opstrategy'.  For example, if it were equality, we'd return just the
- * partition that would contain that key or a set of partitions if the key
- * didn't consist of all partitioning columns.  For non-equality strategies,
- * we'd need to include other partitions as appropriate.
- *
- * 'nullkeys' is the set containing the offset of the partition keys (0 to
- * partnatts - 1) that were matched to an IS NULL clause.  This is only
- * considered for hash partitioning as we need to pass which keys are null
- * to the hash partition bound search function.  It is never possible to
- * have an expression be present in 'exprs' for a given partition key and
- * the corresponding bit set in 'nullkeys'.
- *----------
- */
-typedef struct PartitionPruneStepOp
-{
-	PartitionPruneStep step;
-
-	StrategyNumber opstrategy;
-	List	   *exprs;
-	List	   *cmpfns;
-	Bitmapset  *nullkeys;
-} PartitionPruneStepOp;
-
-/*----------
- * PartitionPruneStepCombine - Information to prune using a BoolExpr clause
- *
- * For BoolExpr clauses, we combine the set of partitions determined for each
- * of its argument clauses.
- *----------
- */
-typedef enum PartitionPruneCombineOp
-{
-	PARTPRUNE_COMBINE_UNION,
-	PARTPRUNE_COMBINE_INTERSECT
-} PartitionPruneCombineOp;
-
-typedef struct PartitionPruneStepCombine
-{
-	PartitionPruneStep step;
-
-	PartitionPruneCombineOp combineOp;
-	List	   *source_stepids;
-} PartitionPruneStepCombine;
-
-/*----------
- * PartitionPruneInfo - Details required to allow the executor to prune
- * partitions.
- *
- * Here we store mapping details to allow translation of a partitioned table's
- * index into subnode indexes for node types which support arbitrary numbers
- * of sub nodes, such as Append.
- *----------
- */
-typedef struct PartitionPruneInfo
-{
-	NodeTag		type;
-	Oid			reloid;			/* Oid of partition rel */
-	List	   *pruning_steps;	/* List of PartitionPruneStep */
-	Bitmapset  *present_parts;	/* Indexes of all partitions which subnodes
-								 * are present for. */
-	int			nparts;			/* The length of the following two arrays */
-	int		   *subnode_map;	/* subnode index by partition id, or -1 */
-	int		   *subpart_map;	/* subpart index by partition id, or -1 */
-	Bitmapset  *extparams;		/* All external paramids seen in prunesteps */
-	Bitmapset  *execparams;		/* All exec paramids seen in prunesteps */
-} PartitionPruneInfo;
 
 #endif							/* PRIMNODES_H */

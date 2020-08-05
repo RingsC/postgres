@@ -3,7 +3,7 @@
  * test_decoding.c
  *		  example logical decoding output plugin
  *
- * Copyright (c) 2012-2018, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/test_decoding/test_decoding.c
@@ -24,7 +24,7 @@
 
 PG_MODULE_MAGIC;
 
-/* These must be available to pg_dlsym() */
+/* These must be available to dlsym() */
 extern void _PG_init(void);
 extern void _PG_output_plugin_init(OutputPluginCallbacks *cb);
 
@@ -39,29 +39,51 @@ typedef struct
 } TestDecodingData;
 
 static void pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
-				  bool is_init);
+							  bool is_init);
 static void pg_decode_shutdown(LogicalDecodingContext *ctx);
 static void pg_decode_begin_txn(LogicalDecodingContext *ctx,
-					ReorderBufferTXN *txn);
+								ReorderBufferTXN *txn);
 static void pg_output_begin(LogicalDecodingContext *ctx,
-				TestDecodingData *data,
-				ReorderBufferTXN *txn,
-				bool last_write);
+							TestDecodingData *data,
+							ReorderBufferTXN *txn,
+							bool last_write);
 static void pg_decode_commit_txn(LogicalDecodingContext *ctx,
-					 ReorderBufferTXN *txn, XLogRecPtr commit_lsn);
+								 ReorderBufferTXN *txn, XLogRecPtr commit_lsn);
 static void pg_decode_change(LogicalDecodingContext *ctx,
-				 ReorderBufferTXN *txn, Relation rel,
-				 ReorderBufferChange *change);
+							 ReorderBufferTXN *txn, Relation rel,
+							 ReorderBufferChange *change);
 static void pg_decode_truncate(LogicalDecodingContext *ctx,
 							   ReorderBufferTXN *txn,
 							   int nrelations, Relation relations[],
 							   ReorderBufferChange *change);
 static bool pg_decode_filter(LogicalDecodingContext *ctx,
-				 RepOriginId origin_id);
+							 RepOriginId origin_id);
 static void pg_decode_message(LogicalDecodingContext *ctx,
-				  ReorderBufferTXN *txn, XLogRecPtr message_lsn,
-				  bool transactional, const char *prefix,
-				  Size sz, const char *message);
+							  ReorderBufferTXN *txn, XLogRecPtr message_lsn,
+							  bool transactional, const char *prefix,
+							  Size sz, const char *message);
+static void pg_decode_stream_start(LogicalDecodingContext *ctx,
+								   ReorderBufferTXN *txn);
+static void pg_decode_stream_stop(LogicalDecodingContext *ctx,
+								  ReorderBufferTXN *txn);
+static void pg_decode_stream_abort(LogicalDecodingContext *ctx,
+								   ReorderBufferTXN *txn,
+								   XLogRecPtr abort_lsn);
+static void pg_decode_stream_commit(LogicalDecodingContext *ctx,
+									ReorderBufferTXN *txn,
+									XLogRecPtr commit_lsn);
+static void pg_decode_stream_change(LogicalDecodingContext *ctx,
+									ReorderBufferTXN *txn,
+									Relation relation,
+									ReorderBufferChange *change);
+static void pg_decode_stream_message(LogicalDecodingContext *ctx,
+									 ReorderBufferTXN *txn, XLogRecPtr message_lsn,
+									 bool transactional, const char *prefix,
+									 Size sz, const char *message);
+static void pg_decode_stream_truncate(LogicalDecodingContext *ctx,
+									  ReorderBufferTXN *txn,
+									  int nrelations, Relation relations[],
+									  ReorderBufferChange *change);
 
 void
 _PG_init(void)
@@ -83,6 +105,13 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 	cb->filter_by_origin_cb = pg_decode_filter;
 	cb->shutdown_cb = pg_decode_shutdown;
 	cb->message_cb = pg_decode_message;
+	cb->stream_start_cb = pg_decode_stream_start;
+	cb->stream_stop_cb = pg_decode_stream_stop;
+	cb->stream_abort_cb = pg_decode_stream_abort;
+	cb->stream_commit_cb = pg_decode_stream_commit;
+	cb->stream_change_cb = pg_decode_stream_change;
+	cb->stream_message_cb = pg_decode_stream_message;
+	cb->stream_truncate_cb = pg_decode_stream_truncate;
 }
 
 
@@ -319,13 +348,6 @@ static void
 tuple_to_stringinfo(StringInfo s, TupleDesc tupdesc, HeapTuple tuple, bool skip_nulls)
 {
 	int			natt;
-	Oid			oid;
-
-	/* print oid of tuple, it's not included in the TupleDesc */
-	if ((oid = HeapTupleHeaderGetOid(tuple->t_data)) != InvalidOid)
-	{
-		appendStringInfo(s, " oid[oid]:%u", oid);
-	}
 
 	/* print all columns individually */
 	for (natt = 0; natt < tupdesc->natts; natt++)
@@ -426,9 +448,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 
 	appendStringInfoString(ctx->out, "table ");
 	appendStringInfoString(ctx->out,
-						   quote_qualified_identifier(
-													  get_namespace_name(
-																		 get_rel_namespace(RelationGetRelid(relation))),
+						   quote_qualified_identifier(get_namespace_name(get_rel_namespace(RelationGetRelid(relation))),
 													  class_form->relrewrite ?
 													  get_rel_name(class_form->relrewrite) :
 													  NameStr(class_form->relname)));
@@ -525,9 +545,9 @@ pg_decode_truncate(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 		|| change->data.truncate.cascade)
 	{
 		if (change->data.truncate.restart_seqs)
-			appendStringInfo(ctx->out, " restart_seqs");
+			appendStringInfoString(ctx->out, " restart_seqs");
 		if (change->data.truncate.cascade)
-			appendStringInfo(ctx->out, " cascade");
+			appendStringInfoString(ctx->out, " cascade");
 	}
 	else
 		appendStringInfoString(ctx->out, " (no-flags)");
@@ -547,5 +567,152 @@ pg_decode_message(LogicalDecodingContext *ctx,
 	appendStringInfo(ctx->out, "message: transactional: %d prefix: %s, sz: %zu content:",
 					 transactional, prefix, sz);
 	appendBinaryStringInfo(ctx->out, message, sz);
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * We never try to stream any empty xact so we don't need any special handling
+ * for skip_empty_xacts in streaming mode APIs.
+ */
+static void
+pg_decode_stream_start(LogicalDecodingContext *ctx,
+					   ReorderBufferTXN *txn)
+{
+	TestDecodingData *data = ctx->output_plugin_private;
+
+	OutputPluginPrepareWrite(ctx, true);
+	if (data->include_xids)
+		appendStringInfo(ctx->out, "opening a streamed block for transaction TXN %u", txn->xid);
+	else
+		appendStringInfo(ctx->out, "opening a streamed block for transaction");
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * We never try to stream any empty xact so we don't need any special handling
+ * for skip_empty_xacts in streaming mode APIs.
+ */
+static void
+pg_decode_stream_stop(LogicalDecodingContext *ctx,
+					  ReorderBufferTXN *txn)
+{
+	TestDecodingData *data = ctx->output_plugin_private;
+
+	OutputPluginPrepareWrite(ctx, true);
+	if (data->include_xids)
+		appendStringInfo(ctx->out, "closing a streamed block for transaction TXN %u", txn->xid);
+	else
+		appendStringInfo(ctx->out, "closing a streamed block for transaction");
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * We never try to stream any empty xact so we don't need any special handling
+ * for skip_empty_xacts in streaming mode APIs.
+ */
+static void
+pg_decode_stream_abort(LogicalDecodingContext *ctx,
+					   ReorderBufferTXN *txn,
+					   XLogRecPtr abort_lsn)
+{
+	TestDecodingData *data = ctx->output_plugin_private;
+
+	OutputPluginPrepareWrite(ctx, true);
+	if (data->include_xids)
+		appendStringInfo(ctx->out, "aborting streamed (sub)transaction TXN %u", txn->xid);
+	else
+		appendStringInfo(ctx->out, "aborting streamed (sub)transaction");
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * We never try to stream any empty xact so we don't need any special handling
+ * for skip_empty_xacts in streaming mode APIs.
+ */
+static void
+pg_decode_stream_commit(LogicalDecodingContext *ctx,
+						ReorderBufferTXN *txn,
+						XLogRecPtr commit_lsn)
+{
+	TestDecodingData *data = ctx->output_plugin_private;
+
+	OutputPluginPrepareWrite(ctx, true);
+
+	if (data->include_xids)
+		appendStringInfo(ctx->out, "committing streamed transaction TXN %u", txn->xid);
+	else
+		appendStringInfo(ctx->out, "committing streamed transaction");
+
+	if (data->include_timestamp)
+		appendStringInfo(ctx->out, " (at %s)",
+						 timestamptz_to_str(txn->commit_time));
+
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * In streaming mode, we don't display the changes as the transaction can abort
+ * at a later point in time.  We don't want users to see the changes until the
+ * transaction is committed.
+ */
+static void
+pg_decode_stream_change(LogicalDecodingContext *ctx,
+						ReorderBufferTXN *txn,
+						Relation relation,
+						ReorderBufferChange *change)
+{
+	TestDecodingData *data = ctx->output_plugin_private;
+
+	OutputPluginPrepareWrite(ctx, true);
+	if (data->include_xids)
+		appendStringInfo(ctx->out, "streaming change for TXN %u", txn->xid);
+	else
+		appendStringInfo(ctx->out, "streaming change for transaction");
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * In streaming mode, we don't display the contents for transactional messages
+ * as the transaction can abort at a later point in time.  We don't want users to
+ * see the message contents until the transaction is committed.
+ */
+static void
+pg_decode_stream_message(LogicalDecodingContext *ctx,
+						 ReorderBufferTXN *txn, XLogRecPtr lsn, bool transactional,
+						 const char *prefix, Size sz, const char *message)
+{
+	OutputPluginPrepareWrite(ctx, true);
+
+	if (transactional)
+	{
+		appendStringInfo(ctx->out, "streaming message: transactional: %d prefix: %s, sz: %zu",
+						 transactional, prefix, sz);
+	}
+	else
+	{
+		appendStringInfo(ctx->out, "streaming message: transactional: %d prefix: %s, sz: %zu content:",
+						 transactional, prefix, sz);
+		appendBinaryStringInfo(ctx->out, message, sz);
+	}
+
+	OutputPluginWrite(ctx, true);
+}
+
+/*
+ * In streaming mode, we don't display the detailed information of Truncate.
+ * See pg_decode_stream_change.
+ */
+static void
+pg_decode_stream_truncate(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
+						  int nrelations, Relation relations[],
+						  ReorderBufferChange *change)
+{
+	TestDecodingData *data = ctx->output_plugin_private;
+
+	OutputPluginPrepareWrite(ctx, true);
+	if (data->include_xids)
+		appendStringInfo(ctx->out, "streaming truncate for TXN %u", txn->xid);
+	else
+		appendStringInfo(ctx->out, "streaming truncate for transaction");
 	OutputPluginWrite(ctx, true);
 }

@@ -3,7 +3,7 @@
  * schemacmds.c
  *	  schema creation/manipulation commands
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,14 +15,14 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
-#include "access/heapam.h"
+#include "access/table.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
-#include "catalog/pg_authid.h"
 #include "catalog/objectaccess.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_namespace.h"
 #include "commands/dbcommands.h"
 #include "commands/event_trigger.h"
@@ -34,7 +34,6 @@
 #include "utils/builtins.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
-
 
 static void AlterSchemaOwner_internal(HeapTuple tup, Relation rel, Oid newOwnerId);
 
@@ -211,29 +210,6 @@ CreateSchemaCommand(CreateSchemaStmt *stmt, const char *queryString,
 	return namespaceId;
 }
 
-/*
- * Guts of schema deletion.
- */
-void
-RemoveSchemaById(Oid schemaOid)
-{
-	Relation	relation;
-	HeapTuple	tup;
-
-	relation = heap_open(NamespaceRelationId, RowExclusiveLock);
-
-	tup = SearchSysCache1(NAMESPACEOID,
-						  ObjectIdGetDatum(schemaOid));
-	if (!HeapTupleIsValid(tup)) /* should not happen */
-		elog(ERROR, "cache lookup failed for namespace %u", schemaOid);
-
-	CatalogTupleDelete(relation, &tup->t_self);
-
-	ReleaseSysCache(tup);
-
-	heap_close(relation, RowExclusiveLock);
-}
-
 
 /*
  * Rename schema
@@ -246,8 +222,9 @@ RenameSchema(const char *oldname, const char *newname)
 	Relation	rel;
 	AclResult	aclresult;
 	ObjectAddress address;
+	Form_pg_namespace nspform;
 
-	rel = heap_open(NamespaceRelationId, RowExclusiveLock);
+	rel = table_open(NamespaceRelationId, RowExclusiveLock);
 
 	tup = SearchSysCacheCopy1(NAMESPACENAME, CStringGetDatum(oldname));
 	if (!HeapTupleIsValid(tup))
@@ -255,7 +232,8 @@ RenameSchema(const char *oldname, const char *newname)
 				(errcode(ERRCODE_UNDEFINED_SCHEMA),
 				 errmsg("schema \"%s\" does not exist", oldname)));
 
-	nspOid = HeapTupleGetOid(tup);
+	nspform = (Form_pg_namespace) GETSTRUCT(tup);
+	nspOid = nspform->oid;
 
 	/* make sure the new name doesn't exist */
 	if (OidIsValid(get_namespace_oid(newname, true)))
@@ -264,7 +242,7 @@ RenameSchema(const char *oldname, const char *newname)
 				 errmsg("schema \"%s\" already exists", newname)));
 
 	/* must be owner */
-	if (!pg_namespace_ownercheck(HeapTupleGetOid(tup), GetUserId()))
+	if (!pg_namespace_ownercheck(nspOid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SCHEMA,
 					   oldname);
 
@@ -281,14 +259,14 @@ RenameSchema(const char *oldname, const char *newname)
 				 errdetail("The prefix \"pg_\" is reserved for system schemas.")));
 
 	/* rename */
-	namestrcpy(&(((Form_pg_namespace) GETSTRUCT(tup))->nspname), newname);
+	namestrcpy(&nspform->nspname, newname);
 	CatalogTupleUpdate(rel, &tup->t_self, tup);
 
-	InvokeObjectPostAlterHook(NamespaceRelationId, HeapTupleGetOid(tup), 0);
+	InvokeObjectPostAlterHook(NamespaceRelationId, nspOid, 0);
 
 	ObjectAddressSet(address, NamespaceRelationId, nspOid);
 
-	heap_close(rel, NoLock);
+	table_close(rel, NoLock);
 	heap_freetuple(tup);
 
 	return address;
@@ -300,7 +278,7 @@ AlterSchemaOwner_oid(Oid oid, Oid newOwnerId)
 	HeapTuple	tup;
 	Relation	rel;
 
-	rel = heap_open(NamespaceRelationId, RowExclusiveLock);
+	rel = table_open(NamespaceRelationId, RowExclusiveLock);
 
 	tup = SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(oid));
 	if (!HeapTupleIsValid(tup))
@@ -310,7 +288,7 @@ AlterSchemaOwner_oid(Oid oid, Oid newOwnerId)
 
 	ReleaseSysCache(tup);
 
-	heap_close(rel, RowExclusiveLock);
+	table_close(rel, RowExclusiveLock);
 }
 
 
@@ -324,8 +302,9 @@ AlterSchemaOwner(const char *name, Oid newOwnerId)
 	HeapTuple	tup;
 	Relation	rel;
 	ObjectAddress address;
+	Form_pg_namespace nspform;
 
-	rel = heap_open(NamespaceRelationId, RowExclusiveLock);
+	rel = table_open(NamespaceRelationId, RowExclusiveLock);
 
 	tup = SearchSysCache1(NAMESPACENAME, CStringGetDatum(name));
 	if (!HeapTupleIsValid(tup))
@@ -333,7 +312,8 @@ AlterSchemaOwner(const char *name, Oid newOwnerId)
 				(errcode(ERRCODE_UNDEFINED_SCHEMA),
 				 errmsg("schema \"%s\" does not exist", name)));
 
-	nspOid = HeapTupleGetOid(tup);
+	nspform = (Form_pg_namespace) GETSTRUCT(tup);
+	nspOid = nspform->oid;
 
 	AlterSchemaOwner_internal(tup, rel, newOwnerId);
 
@@ -341,7 +321,7 @@ AlterSchemaOwner(const char *name, Oid newOwnerId)
 
 	ReleaseSysCache(tup);
 
-	heap_close(rel, RowExclusiveLock);
+	table_close(rel, RowExclusiveLock);
 
 	return address;
 }
@@ -372,7 +352,7 @@ AlterSchemaOwner_internal(HeapTuple tup, Relation rel, Oid newOwnerId)
 		AclResult	aclresult;
 
 		/* Otherwise, must be owner of the existing object */
-		if (!pg_namespace_ownercheck(HeapTupleGetOid(tup), GetUserId()))
+		if (!pg_namespace_ownercheck(nspForm->oid, GetUserId()))
 			aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_SCHEMA,
 						   NameStr(nspForm->nspname));
 
@@ -422,10 +402,10 @@ AlterSchemaOwner_internal(HeapTuple tup, Relation rel, Oid newOwnerId)
 		heap_freetuple(newtuple);
 
 		/* Update owner dependency reference */
-		changeDependencyOnOwner(NamespaceRelationId, HeapTupleGetOid(tup),
+		changeDependencyOnOwner(NamespaceRelationId, nspForm->oid,
 								newOwnerId);
 	}
 
 	InvokeObjectPostAlterHook(NamespaceRelationId,
-							  HeapTupleGetOid(tup), 0);
+							  nspForm->oid, 0);
 }

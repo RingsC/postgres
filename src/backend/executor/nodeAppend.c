@@ -3,7 +3,7 @@
  * nodeAppend.c
  *	  routines to handle append nodes.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -78,7 +78,6 @@ struct ParallelAppendState
 };
 
 #define INVALID_SUBPLAN_INDEX		-1
-#define NO_MATCHING_SUBPLANS		-2
 
 static TupleTableSlot *ExecAppend(PlanState *pstate);
 static bool choose_next_subplan_locally(AppendState *node);
@@ -107,16 +106,9 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	int			firstvalid;
 	int			i,
 				j;
-	ListCell   *lc;
 
 	/* check for unsupported flags */
 	Assert(!(eflags & EXEC_FLAG_MARK));
-
-	/*
-	 * Lock the non-leaf tables in the partition tree controlled by this node.
-	 * It's a no-op for non-partitioned parent tables.
-	 */
-	ExecLockNonLeafAppendTables(node->partitioned_rels, estate);
 
 	/*
 	 * create new AppendState for our append node
@@ -129,41 +121,24 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	appendstate->as_whichplan = INVALID_SUBPLAN_INDEX;
 
 	/* If run-time partition pruning is enabled, then set that up now */
-	if (node->part_prune_infos != NIL)
+	if (node->part_prune_info != NULL)
 	{
 		PartitionPruneState *prunestate;
 
+		/* We may need an expression context to evaluate partition exprs */
 		ExecAssignExprContext(estate, &appendstate->ps);
 
-		prunestate = ExecSetupPartitionPruneState(&appendstate->ps,
-												  node->part_prune_infos);
+		/* Create the working data structure for pruning. */
+		prunestate = ExecCreatePartitionPruneState(&appendstate->ps,
+												   node->part_prune_info);
+		appendstate->as_prune_state = prunestate;
 
-		/*
-		 * When there are external params matching the partition key we may be
-		 * able to prune away Append subplans now.
-		 */
-		if (!bms_is_empty(prunestate->extparams))
+		/* Perform an initial partition prune, if required. */
+		if (prunestate->do_initial_prune)
 		{
-			/* Determine which subplans match the external params */
+			/* Determine which subplans survive initial pruning */
 			validsubplans = ExecFindInitialMatchingSubPlans(prunestate,
 															list_length(node->appendplans));
-
-			/*
-			 * If no subplans match the given parameters then we must handle
-			 * this case in a special way.  The problem here is that code in
-			 * explain.c requires an Append to have at least one subplan in
-			 * order for it to properly determine the Vars in that subplan's
-			 * targetlist.  We sidestep this issue by just initializing the
-			 * first subplan and setting as_whichplan to NO_MATCHING_SUBPLANS
-			 * to indicate that we don't need to scan any subnodes.
-			 */
-			if (bms_is_empty(validsubplans))
-			{
-				appendstate->as_whichplan = NO_MATCHING_SUBPLANS;
-
-				/* Mark the first as valid so that it's initialized below */
-				validsubplans = bms_make_singleton(0);
-			}
 
 			nplans = bms_num_members(validsubplans);
 		}
@@ -171,18 +146,17 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 		{
 			/* We'll need to initialize all subplans */
 			nplans = list_length(node->appendplans);
+			Assert(nplans > 0);
 			validsubplans = bms_add_range(NULL, 0, nplans - 1);
 		}
 
 		/*
-		 * If there's no exec params then no further pruning can be done, we
-		 * can just set the valid subplans to all remaining subplans.
+		 * When no run-time pruning is required and there's at least one
+		 * subplan, we can fill as_valid_subplans immediately, preventing
+		 * later calls to ExecFindMatchingSubPlans.
 		 */
-		if (bms_is_empty(prunestate->execparams))
+		if (!prunestate->do_exec_prune && nplans > 0)
 			appendstate->as_valid_subplans = bms_add_range(NULL, 0, nplans - 1);
-
-		appendstate->as_prune_state = prunestate;
-
 	}
 	else
 	{
@@ -190,8 +164,9 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 
 		/*
 		 * When run-time partition pruning is not enabled we can just mark all
-		 * subplans as valid, they must also all be initialized.
+		 * subplans as valid; they must also all be initialized.
 		 */
+		Assert(nplans > 0);
 		appendstate->as_valid_subplans = validsubplans =
 			bms_add_range(NULL, 0, nplans - 1);
 		appendstate->as_prune_state = NULL;
@@ -200,7 +175,11 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	/*
 	 * Initialize result tuple type and slot.
 	 */
-	ExecInitResultTupleSlotTL(estate, &appendstate->ps);
+	ExecInitResultTupleSlotTL(&appendstate->ps, &TTSOpsVirtual);
+
+	/* node returns slots from each of its subnodes, therefore not fixed */
+	appendstate->ps.resultopsset = true;
+	appendstate->ps.resultopsfixed = false;
 
 	appendplanstates = (PlanState **) palloc(nplans *
 											 sizeof(PlanState *));
@@ -211,24 +190,20 @@ ExecInitAppend(Append *node, EState *estate, int eflags)
 	 *
 	 * While at it, find out the first valid partial plan.
 	 */
-	j = i = 0;
+	j = 0;
 	firstvalid = nplans;
-	foreach(lc, node->appendplans)
+	i = -1;
+	while ((i = bms_next_member(validsubplans, i)) >= 0)
 	{
-		if (bms_is_member(i, validsubplans))
-		{
-			Plan	   *initNode = (Plan *) lfirst(lc);
+		Plan	   *initNode = (Plan *) list_nth(node->appendplans, i);
 
-			/*
-			 * Record the lowest appendplans index which is a valid partial
-			 * plan.
-			 */
-			if (i >= node->first_partial_plan && j < firstvalid)
-				firstvalid = j;
+		/*
+		 * Record the lowest appendplans index which is a valid partial plan.
+		 */
+		if (i >= node->first_partial_plan && j < firstvalid)
+			firstvalid = j;
 
-			appendplanstates[j++] = ExecInitNode(initNode, estate, eflags);
-		}
-		i++;
+		appendplanstates[j++] = ExecInitNode(initNode, estate, eflags);
 	}
 
 	appendstate->as_first_partial_plan = firstvalid;
@@ -260,16 +235,16 @@ ExecAppend(PlanState *pstate)
 
 	if (node->as_whichplan < 0)
 	{
+		/* Nothing to do if there are no subplans */
+		if (node->as_nplans == 0)
+			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+
 		/*
 		 * If no subplan has been chosen, we must choose one before
 		 * proceeding.
 		 */
 		if (node->as_whichplan == INVALID_SUBPLAN_INDEX &&
 			!node->choose_next_subplan(node))
-			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
-
-		/* Nothing to do if there are no matching subplans */
-		else if (node->as_whichplan == NO_MATCHING_SUBPLANS)
 			return ExecClearTuple(node->ps.ps_ResultTupleSlot);
 	}
 
@@ -341,13 +316,13 @@ ExecReScanAppend(AppendState *node)
 	int			i;
 
 	/*
-	 * If any of the parameters being used for partition pruning have changed,
-	 * then we'd better unset the valid subplans so that they are reselected
-	 * for the new parameter values.
+	 * If any PARAM_EXEC Params used in pruning expressions have changed, then
+	 * we'd better unset the valid subplans so that they are reselected for
+	 * the new parameter values.
 	 */
 	if (node->as_prune_state &&
 		bms_overlap(node->ps.chgParam,
-					node->as_prune_state->execparams))
+					node->as_prune_state->execparamids))
 	{
 		bms_free(node->as_valid_subplans);
 		node->as_valid_subplans = NULL;
@@ -465,7 +440,7 @@ choose_next_subplan_locally(AppendState *node)
 	int			nextplan;
 
 	/* We should never be called when there are no subplans */
-	Assert(whichplan != NO_MATCHING_SUBPLANS);
+	Assert(node->as_nplans > 0);
 
 	/*
 	 * If first call then have the bms member function choose the first valid
@@ -516,7 +491,7 @@ choose_next_subplan_for_leader(AppendState *node)
 	Assert(ScanDirectionIsForward(node->ps.state->es_direction));
 
 	/* We should never be called when there are no subplans */
-	Assert(node->as_whichplan != NO_MATCHING_SUBPLANS);
+	Assert(node->as_nplans > 0);
 
 	LWLockAcquire(&pstate->pa_lock, LW_EXCLUSIVE);
 
@@ -531,9 +506,9 @@ choose_next_subplan_for_leader(AppendState *node)
 		node->as_whichplan = node->as_nplans - 1;
 
 		/*
-		 * If we've yet to determine the valid subplans for these parameters
-		 * then do so now.  If run-time pruning is disabled then the valid
-		 * subplans will always be set to all subplans.
+		 * If we've yet to determine the valid subplans then do so now.  If
+		 * run-time pruning is disabled then the valid subplans will always be
+		 * set to all subplans.
 		 */
 		if (node->as_valid_subplans == NULL)
 		{
@@ -597,7 +572,7 @@ choose_next_subplan_for_worker(AppendState *node)
 	Assert(ScanDirectionIsForward(node->ps.state->es_direction));
 
 	/* We should never be called when there are no subplans */
-	Assert(node->as_whichplan != NO_MATCHING_SUBPLANS);
+	Assert(node->as_nplans > 0);
 
 	LWLockAcquire(&pstate->pa_lock, LW_EXCLUSIVE);
 
@@ -606,9 +581,9 @@ choose_next_subplan_for_worker(AppendState *node)
 		node->as_pstate->pa_finished[node->as_whichplan] = true;
 
 	/*
-	 * If we've yet to determine the valid subplans for these parameters then
-	 * do so now.  If run-time pruning is disabled then the valid subplans
-	 * will always be set to all subplans.
+	 * If we've yet to determine the valid subplans then do so now.  If
+	 * run-time pruning is disabled then the valid subplans will always be set
+	 * to all subplans.
 	 */
 	else if (node->as_valid_subplans == NULL)
 	{

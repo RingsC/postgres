@@ -3,10 +3,11 @@
  */
 #include "postgres.h"
 
-#include "catalog/pg_type.h"
+#include <limits.h>
 
 #include "_int.h"
-
+#include "catalog/pg_type.h"
+#include "lib/qunique.h"
 
 /* arguments are assumed sorted & unique-ified */
 bool
@@ -220,7 +221,17 @@ ArrayType *
 new_intArrayType(int num)
 {
 	ArrayType  *r;
-	int			nbytes = ARR_OVERHEAD_NONULLS(1) + sizeof(int) * num;
+	int			nbytes;
+
+	/* if no elements, return a zero-dimensional array */
+	if (num <= 0)
+	{
+		Assert(num == 0);
+		r = construct_empty_array(INT4OID);
+		return r;
+	}
+
+	nbytes = ARR_OVERHEAD_NONULLS(1) + sizeof(int) * num;
 
 	r = (ArrayType *) palloc0(nbytes);
 
@@ -237,18 +248,21 @@ new_intArrayType(int num)
 ArrayType *
 resize_intArrayType(ArrayType *a, int num)
 {
-	int			nbytes = ARR_DATA_OFFSET(a) + sizeof(int) * num;
+	int			nbytes;
 	int			i;
 
 	/* if no elements, return a zero-dimensional array */
-	if (num == 0)
+	if (num <= 0)
 	{
-		ARR_NDIM(a) = 0;
+		Assert(num == 0);
+		a = construct_empty_array(INT4OID);
 		return a;
 	}
 
 	if (num == ARRNELEMS(a))
 		return a;
+
+	nbytes = ARR_DATA_OFFSET(a) + sizeof(int) * num;
 
 	a = (ArrayType *) repalloc(a, nbytes);
 
@@ -277,50 +291,42 @@ copy_intArrayType(ArrayType *a)
 int
 internal_size(int *a, int len)
 {
-	int			i,
-				size = 0;
+	int			i;
+	int64		size = 0;
 
 	for (i = 0; i < len; i += 2)
 	{
 		if (!i || a[i] != a[i - 1]) /* do not count repeated range */
-			size += a[i + 1] - a[i] + 1;
+			size += (int64) (a[i + 1]) - (int64) (a[i]) + 1;
 	}
 
-	return size;
+	if (size > (int64) INT_MAX || size < (int64) INT_MIN)
+		return -1;				/* overflow */
+	return (int) size;
 }
 
 /* unique-ify elements of r in-place ... r must be sorted already */
 ArrayType *
 _int_unique(ArrayType *r)
 {
-	int		   *tmp,
-			   *dr,
-			   *data;
 	int			num = ARRNELEMS(r);
+	bool		duplicates_found;	/* not used */
 
-	if (num < 2)
-		return r;
+	num = qunique_arg(ARRPTR(r), num, sizeof(int), isort_cmp,
+					  &duplicates_found);
 
-	data = tmp = dr = ARRPTR(r);
-	while (tmp - data < num)
-	{
-		if (*tmp != *dr)
-			*(++dr) = *tmp++;
-		else
-			tmp++;
-	}
-	return resize_intArrayType(r, dr + 1 - ARRPTR(r));
+	return resize_intArrayType(r, num);
 }
 
 void
-gensign(BITVEC sign, int *a, int len)
+gensign(BITVECP sign, int *a, int len, int siglen)
 {
 	int			i;
 
 	/* we assume that the sign vector is previously zeroed */
 	for (i = 0; i < len; i++)
 	{
-		HASH(sign, *a);
+		HASH(sign, *a, siglen);
 		a++;
 	}
 }

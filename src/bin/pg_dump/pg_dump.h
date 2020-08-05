@@ -3,7 +3,7 @@
  * pg_dump.h
  *	  Common header file for the pg_dump utility
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_dump/pg_dump.h
@@ -18,10 +18,6 @@
 
 
 #define oidcmp(x,y) ( ((x) < (y) ? -1 : ((x) > (y)) ?  1 : 0) )
-#define oideq(x,y) ( (x) == (y) )
-#define oidle(x,y) ( (x) <= (y) )
-#define oidge(x,y) ( (x) >= (y) )
-#define oidzero(x) ( (x) == 0 )
 
 /*
  * The data structures used to store system catalog information.  Every
@@ -136,6 +132,7 @@ typedef struct _dumpableObject
 	DumpComponents dump;		/* bitmask of components to dump */
 	DumpComponents dump_contains;	/* as above, but for contained objects */
 	bool		ext_member;		/* true if object is member of extension */
+	bool		depends_on_ext; /* true if object depends on an extension */
 	DumpId	   *dependencies;	/* dumpIds of objects this one depends on */
 	int			nDeps;			/* number of valid dependencies */
 	int			allocDeps;		/* allocated size of dependencies[] */
@@ -286,6 +283,7 @@ typedef struct _tableInfo
 	uint32		toast_minmxid;	/* toast table's relminmxid */
 	int			ncheck;			/* # of CHECK expressions */
 	char	   *reloftype;		/* underlying type for typed table */
+	Oid			foreign_server; /* foreign server oid, if applicable */
 	/* these two are set only if table is a sequence owned by a column: */
 	Oid			owning_tab;		/* OID of table owning sequence */
 	int			owning_col;		/* attr # of column owning sequence */
@@ -310,12 +308,14 @@ typedef struct _tableInfo
 	char	   *typstorage;		/* type storage scheme */
 	bool	   *attisdropped;	/* true if attr is dropped; don't dump it */
 	char	   *attidentity;
+	char	   *attgenerated;
 	int		   *attlen;			/* attribute length, used by binary_upgrade */
 	char	   *attalign;		/* attribute align, used by binary_upgrade */
 	bool	   *attislocal;		/* true if attr has local definition */
 	char	  **attoptions;		/* per-attribute options */
 	Oid		   *attcollation;	/* per-attribute collation selection */
 	char	  **attfdwoptions;	/* per-attribute fdw options */
+	char	  **attmissingval;	/* per attribute missing value */
 	bool	   *notnull;		/* NOT NULL constraints on attributes */
 	bool	   *inhNotNull;		/* true if NOT NULL is inherited */
 	struct _attrDefInfo **attrdefs; /* DEFAULT expressions */
@@ -323,6 +323,7 @@ typedef struct _tableInfo
 	char	   *partkeydef;		/* partition key definition */
 	char	   *partbound;		/* partition bound definition */
 	bool		needs_override; /* has GENERATED ALWAYS AS IDENTITY */
+	char	   *amname;			/* relation access method */
 
 	/*
 	 * Stuff computed only for dumpable tables.
@@ -349,7 +350,6 @@ typedef struct _tableDataInfo
 {
 	DumpableObject dobj;
 	TableInfo  *tdtable;		/* link to table to dump */
-	bool		oids;			/* include OIDs in data? */
 	char	   *filtercond;		/* WHERE condition to limit rows dumped */
 } TableDataInfo;
 
@@ -360,6 +360,8 @@ typedef struct _indxInfo
 	char	   *indexdef;
 	char	   *tablespace;		/* tablespace in which index is stored */
 	char	   *indreloptions;	/* options specified by WITH (...) */
+	char	   *indstatcols;	/* column numbers with statistics */
+	char	   *indstatvals;	/* statistic values for columns */
 	int			indnkeyattrs;	/* number of index key attributes */
 	int			indnattrs;		/* total number of index attributes */
 	Oid		   *indkeys;		/* In spite of the name 'indkeys' this field
@@ -367,9 +369,10 @@ typedef struct _indxInfo
 	bool		indisclustered;
 	bool		indisreplident;
 	Oid			parentidx;		/* if partitioned, parent index OID */
+	SimplePtrList partattaches; /* if partitioned, partition attach objects */
+
 	/* if there is an associated constraint object, its dumpId: */
 	DumpId		indexconstraint;
-	int			relpages;		/* relpages of the underlying table */
 } IndxInfo;
 
 typedef struct _indexAttachInfo
@@ -383,6 +386,7 @@ typedef struct _statsExtInfo
 {
 	DumpableObject dobj;
 	char	   *rolname;		/* name of owner, or empty string */
+	int			stattarget;		/* statistics target */
 } StatsExtInfo;
 
 typedef struct _ruleInfo
@@ -598,6 +602,7 @@ typedef struct _PublicationInfo
 	bool		pubupdate;
 	bool		pubdelete;
 	bool		pubtruncate;
+	bool		pubviaroot;
 } PublicationInfo;
 
 /*
@@ -620,6 +625,7 @@ typedef struct _SubscriptionInfo
 	char	   *rolname;
 	char	   *subconninfo;
 	char	   *subslotname;
+	char	   *subbinary;
 	char	   *subsynccommit;
 	char	   *subpublications;
 } SubscriptionInfo;
@@ -633,16 +639,6 @@ typedef struct _extensionMemberId
 	CatalogId	catId;			/* tableoid+oid of some member object */
 	ExtensionInfo *ext;			/* owning extension */
 } ExtensionMemberId;
-
-/* global decls */
-extern bool force_quotes;		/* double-quotes for identifiers flag */
-extern bool g_verbose;			/* verbose flag */
-
-/* placeholders for comment starting and ending delimiters */
-extern char g_comment_start[10];
-extern char g_comment_end[10];
-
-extern char g_opaque_type[10];	/* name for the opaque type */
 
 /*
  *	common utility functions
@@ -674,9 +670,8 @@ extern ExtensionInfo *findOwningExtension(CatalogId catalogId);
 extern void parseOidArray(const char *str, Oid *array, int arraysize);
 
 extern void sortDumpableObjects(DumpableObject **objs, int numObjs,
-					DumpId preBoundaryId, DumpId postBoundaryId);
+								DumpId preBoundaryId, DumpId postBoundaryId);
 extern void sortDumpableObjectsByTypeName(DumpableObject **objs, int numObjs);
-extern void sortDataAndIndexObjectsBySize(DumpableObject **objs, int numObjs);
 
 /*
  * version specific routines
@@ -710,19 +705,19 @@ extern TSDictInfo *getTSDictionaries(Archive *fout, int *numTSDicts);
 extern TSTemplateInfo *getTSTemplates(Archive *fout, int *numTSTemplates);
 extern TSConfigInfo *getTSConfigurations(Archive *fout, int *numTSConfigs);
 extern FdwInfo *getForeignDataWrappers(Archive *fout,
-					   int *numForeignDataWrappers);
+									   int *numForeignDataWrappers);
 extern ForeignServerInfo *getForeignServers(Archive *fout,
-				  int *numForeignServers);
+											int *numForeignServers);
 extern DefaultACLInfo *getDefaultACLs(Archive *fout, int *numDefaultACLs);
 extern void getExtensionMembership(Archive *fout, ExtensionInfo extinfo[],
-					   int numExtensions);
+								   int numExtensions);
 extern void processExtensionTables(Archive *fout, ExtensionInfo extinfo[],
-					   int numExtensions);
+								   int numExtensions);
 extern EventTriggerInfo *getEventTriggers(Archive *fout, int *numEventTriggers);
 extern void getPolicies(Archive *fout, TableInfo tblinfo[], int numTables);
 extern void getPublications(Archive *fout);
 extern void getPublicationTables(Archive *fout, TableInfo tblinfo[],
-					 int numTables);
+								 int numTables);
 extern void getSubscriptions(Archive *fout);
 
 #endif							/* PG_DUMP_H */

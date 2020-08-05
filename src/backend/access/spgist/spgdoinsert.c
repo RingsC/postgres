@@ -4,7 +4,7 @@
  *	  implementation of insert algorithm
  *
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -289,7 +289,7 @@ addLeafTuple(Relation index, SpGistState *state, SpGistLeafTuple leafTuple,
 
 	MarkBufferDirty(current->buffer);
 
-	if (RelationNeedsWAL(index))
+	if (RelationNeedsWAL(index) && !state->isBuild)
 	{
 		XLogRecPtr	recptr;
 		int			flags;
@@ -516,7 +516,7 @@ moveLeafs(Relation index, SpGistState *state,
 	MarkBufferDirty(current->buffer);
 	MarkBufferDirty(nbuf);
 
-	if (RelationNeedsWAL(index))
+	if (RelationNeedsWAL(index) && !state->isBuild)
 	{
 		XLogRecPtr	recptr;
 
@@ -1334,7 +1334,7 @@ doPickSplit(Relation index, SpGistState *state,
 		saveCurrent.buffer = InvalidBuffer;
 	}
 
-	if (RelationNeedsWAL(index))
+	if (RelationNeedsWAL(index) && !state->isBuild)
 	{
 		XLogRecPtr	recptr;
 		int			flags;
@@ -1531,7 +1531,7 @@ spgAddNodeAction(Relation index, SpGistState *state,
 
 		MarkBufferDirty(current->buffer);
 
-		if (RelationNeedsWAL(index))
+		if (RelationNeedsWAL(index) && !state->isBuild)
 		{
 			XLogRecPtr	recptr;
 
@@ -1644,7 +1644,7 @@ spgAddNodeAction(Relation index, SpGistState *state,
 
 		MarkBufferDirty(saveCurrent.buffer);
 
-		if (RelationNeedsWAL(index))
+		if (RelationNeedsWAL(index) && !state->isBuild)
 		{
 			XLogRecPtr	recptr;
 			int			flags;
@@ -1840,7 +1840,7 @@ spgSplitNodeAction(Relation index, SpGistState *state,
 
 	MarkBufferDirty(current->buffer);
 
-	if (RelationNeedsWAL(index))
+	if (RelationNeedsWAL(index) && !state->isBuild)
 	{
 		XLogRecPtr	recptr;
 
@@ -1908,11 +1908,12 @@ spgdoinsert(Relation index, SpGistState *state,
 	/*
 	 * Prepare the leaf datum to insert.
 	 *
-	 * If an optional "compress" method is provided, then call it to form
-	 * the leaf datum from the input datum.  Otherwise store the input datum as
-	 * is.  Since we don't use index_form_tuple in this AM, we have to make sure
-	 * value to be inserted is not toasted; FormIndexDatum doesn't guarantee
-	 * that.  But we assume the "compress" method to return an untoasted value.
+	 * If an optional "compress" method is provided, then call it to form the
+	 * leaf datum from the input datum.  Otherwise store the input datum as
+	 * is.  Since we don't use index_form_tuple in this AM, we have to make
+	 * sure value to be inserted is not toasted; FormIndexDatum doesn't
+	 * guarantee that.  But we assume the "compress" method to return an
+	 * untoasted value.
 	 */
 	if (!isnull)
 	{

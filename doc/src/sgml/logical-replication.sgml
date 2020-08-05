@@ -66,6 +66,13 @@
 
    <listitem>
     <para>
+     Replicating between PostgreSQL instances on different platforms (for
+     example Linux to Windows)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
      Giving access to replicated data to different groups of users.
     </para>
    </listitem>
@@ -92,7 +99,7 @@
 
   <para>
    A <firstterm>publication</firstterm> can be defined on any physical
-   replication master.  The node where a publication is defined is referred to
+   replication primary.  The node where a publication is defined is referred to
    as <firstterm>publisher</firstterm>.  A publication is a set of changes
    generated from a table or a group of tables, and might also be described as
    a change set or replication set.  Each publication exists in only one database.
@@ -225,10 +232,15 @@
   </para>
 
   <para>
-   Columns of a table are also matched by name.  A different order of columns
-   in the target table is allowed, but the column types have to match.  The
-   target table can have additional columns not provided by the published
-   table.  Those will be filled with their default values.
+   Columns of a table are also matched by name.  The order of columns in the
+   subscriber table does not need to match that of the publisher.  The data
+   types of the columns do not need to match, as long as the text
+   representation of the data can be converted to the target type.  For
+   example, you can replicate from a column of type <type>integer</type> to a
+   column of type <type>bigint</type>.  The target table can also have
+   additional columns not provided by the published table.  Any such columns
+   will be filled with the default value as specified in the definition of the
+   target table.
   </para>
 
   <sect2 id="logical-replication-subscription-slot">
@@ -366,6 +378,22 @@
 
    <listitem>
     <para>
+     Replication of <command>TRUNCATE</command> commands is supported, but
+     some care must be taken when truncating groups of tables connected by
+     foreign keys.  When replicating a truncate action, the subscriber will
+     truncate the same group of tables that was truncated on the publisher,
+     either explicitly specified or implicitly collected via
+     <literal>CASCADE</literal>, minus tables that are not part of the
+     subscription.  This will work correctly if all affected tables are part
+     of the same subscription.  But if some tables to be truncated on the
+     subscriber have foreign-key links to tables that are not part of the same
+     (or any) subscription, then the application of the truncate action on the
+     subscriber will fail.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
      Large objects (see <xref linkend="largeobjects"/>) are not replicated.
      There is no workaround for that, other than storing data in normal
      tables.
@@ -374,13 +402,23 @@
 
    <listitem>
     <para>
-     Replication is only possible from base tables to base tables.  That is,
-     the tables on the publication and on the subscription side must be normal
-     tables, not views, materialized views, partition root tables, or foreign
-     tables.  In the case of partitions, you can therefore replicate a
-     partition hierarchy one-to-one, but you cannot currently replicate to a
-     differently partitioned setup.  Attempts to replicate tables other than
-     base tables will result in an error.
+     Replication is only supported by tables, including partitioned tables.
+     Attempts to replicate other types of relations such as views, materialized
+     views, or foreign tables, will result in an error.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+     When replicating between partitioned tables, the actual replication
+     originates, by default, from the leaf partitions on the publisher, so
+     partitions on the publisher must also exist on the subscriber as valid
+     target tables. (They could either be leaf partitions themselves, or they
+     could be further subpartitioned, or they could even be independent
+     tables.)  Publications can also specify that changes are to be replicated
+     using the identity and schema of the partitioned root table instead of
+     that of the individual leaf partitions in which the changes actually
+     originate (see <xref linkend="sql-createpublication"/>).
     </para>
    </listitem>
   </itemizedlist>
@@ -451,13 +489,14 @@
    Because logical replication is based on a similar architecture as
    <link linkend="streaming-replication">physical streaming replication</link>,
    the monitoring on a publication node is similar to monitoring of a
-   physical replication master
+   physical replication primary
    (see <xref linkend="streaming-replication-monitoring"/>).
   </para>
 
   <para>
    The monitoring information about subscription is visible in
-   <link linkend="pg-stat-subscription"><literal>pg_stat_subscription</literal></link>.
+   <link linkend="monitoring-pg-stat-subscription">
+   <structname>pg_stat_subscription</structname></link>.
    This view contains one row for every subscription worker.  A subscription
    can have zero or more active subscription workers depending on its state.
   </para>

@@ -3,7 +3,7 @@
  * pquery.c
  *	  POSTGRES process query command code
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -36,27 +36,27 @@ Portal		ActivePortal = NULL;
 
 
 static void ProcessQuery(PlannedStmt *plan,
-			 const char *sourceText,
-			 ParamListInfo params,
-			 QueryEnvironment *queryEnv,
-			 DestReceiver *dest,
-			 char *completionTag);
+						 const char *sourceText,
+						 ParamListInfo params,
+						 QueryEnvironment *queryEnv,
+						 DestReceiver *dest,
+						 QueryCompletion *qc);
 static void FillPortalStore(Portal portal, bool isTopLevel);
 static uint64 RunFromStore(Portal portal, ScanDirection direction, uint64 count,
-			 DestReceiver *dest);
+						   DestReceiver *dest);
 static uint64 PortalRunSelect(Portal portal, bool forward, long count,
-				DestReceiver *dest);
+							  DestReceiver *dest);
 static void PortalRunUtility(Portal portal, PlannedStmt *pstmt,
-				 bool isTopLevel, bool setHoldSnapshot,
-				 DestReceiver *dest, char *completionTag);
+							 bool isTopLevel, bool setHoldSnapshot,
+							 DestReceiver *dest, QueryCompletion *qc);
 static void PortalRunMulti(Portal portal,
-			   bool isTopLevel, bool setHoldSnapshot,
-			   DestReceiver *dest, DestReceiver *altdest,
-			   char *completionTag);
+						   bool isTopLevel, bool setHoldSnapshot,
+						   DestReceiver *dest, DestReceiver *altdest,
+						   QueryCompletion *qc);
 static uint64 DoPortalRunFetch(Portal portal,
-				 FetchDirection fdirection,
-				 long count,
-				 DestReceiver *dest);
+							   FetchDirection fdirection,
+							   long count,
+							   DestReceiver *dest);
 static void DoPortalRewind(Portal portal);
 
 
@@ -125,10 +125,9 @@ FreeQueryDesc(QueryDesc *qdesc)
  *	sourceText: the source text of the query
  *	params: any parameters needed
  *	dest: where to send results
- *	completionTag: points to a buffer of size COMPLETION_TAG_BUFSIZE
- *		in which to store a command completion status string.
+ *	qc: where to store the command completion status data.
  *
- * completionTag may be NULL if caller doesn't want a status string.
+ * qc may be NULL if caller doesn't want a status string.
  *
  * Must be called in a memory context that will be reset or deleted on
  * error; otherwise the executor's memory usage will be leaked.
@@ -139,7 +138,7 @@ ProcessQuery(PlannedStmt *plan,
 			 ParamListInfo params,
 			 QueryEnvironment *queryEnv,
 			 DestReceiver *dest,
-			 char *completionTag)
+			 QueryCompletion *qc)
 {
 	QueryDesc  *queryDesc;
 
@@ -161,40 +160,26 @@ ProcessQuery(PlannedStmt *plan,
 	ExecutorRun(queryDesc, ForwardScanDirection, 0L, true);
 
 	/*
-	 * Build command completion status string, if caller wants one.
+	 * Build command completion status data, if caller wants one.
 	 */
-	if (completionTag)
+	if (qc)
 	{
-		Oid			lastOid;
-
 		switch (queryDesc->operation)
 		{
 			case CMD_SELECT:
-				snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
-						 "SELECT " UINT64_FORMAT,
-						 queryDesc->estate->es_processed);
+				SetQueryCompletion(qc, CMDTAG_SELECT, queryDesc->estate->es_processed);
 				break;
 			case CMD_INSERT:
-				if (queryDesc->estate->es_processed == 1)
-					lastOid = queryDesc->estate->es_lastoid;
-				else
-					lastOid = InvalidOid;
-				snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
-						 "INSERT %u " UINT64_FORMAT,
-						 lastOid, queryDesc->estate->es_processed);
+				SetQueryCompletion(qc, CMDTAG_INSERT, queryDesc->estate->es_processed);
 				break;
 			case CMD_UPDATE:
-				snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
-						 "UPDATE " UINT64_FORMAT,
-						 queryDesc->estate->es_processed);
+				SetQueryCompletion(qc, CMDTAG_UPDATE, queryDesc->estate->es_processed);
 				break;
 			case CMD_DELETE:
-				snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
-						 "DELETE " UINT64_FORMAT,
-						 queryDesc->estate->es_processed);
+				SetQueryCompletion(qc, CMDTAG_DELETE, queryDesc->estate->es_processed);
 				break;
 			default:
-				strcpy(completionTag, "???");
+				SetQueryCompletion(qc, CMDTAG_UNKNOWN, queryDesc->estate->es_processed);
 				break;
 		}
 	}
@@ -551,8 +536,7 @@ PortalStart(Portal portal, ParamListInfo params,
 
 					pstmt = PortalGetPrimaryStmt(portal);
 					portal->tupDesc =
-						ExecCleanTypeFromTL(pstmt->planTree->targetlist,
-											false);
+						ExecCleanTypeFromTL(pstmt->planTree->targetlist);
 				}
 
 				/*
@@ -678,9 +662,8 @@ PortalSetResultFormat(Portal portal, int nFormats, int16 *formats)
  *
  * altdest: where to send output of non-primary queries
  *
- * completionTag: points to a buffer of size COMPLETION_TAG_BUFSIZE
- *		in which to store a command completion status string.
- *		May be NULL if caller doesn't want a status string.
+ * qc: where to store command completion status data.
+ *		May be NULL if caller doesn't want status data.
  *
  * Returns true if the portal's execution is complete, false if it was
  * suspended due to exhaustion of the count parameter.
@@ -688,7 +671,7 @@ PortalSetResultFormat(Portal portal, int nFormats, int16 *formats)
 bool
 PortalRun(Portal portal, long count, bool isTopLevel, bool run_once,
 		  DestReceiver *dest, DestReceiver *altdest,
-		  char *completionTag)
+		  QueryCompletion *qc)
 {
 	bool		result;
 	uint64		nprocessed;
@@ -703,9 +686,9 @@ PortalRun(Portal portal, long count, bool isTopLevel, bool run_once,
 
 	TRACE_POSTGRESQL_QUERY_EXECUTE_START();
 
-	/* Initialize completion tag to empty string */
-	if (completionTag)
-		completionTag[0] = '\0';
+	/* Initialize empty completion data */
+	if (qc)
+		InitializeQueryCompletion(qc);
 
 	if (log_executor_stats && portal->strategy != PORTAL_MULTI_QUERY)
 	{
@@ -774,16 +757,13 @@ PortalRun(Portal portal, long count, bool isTopLevel, bool run_once,
 
 				/*
 				 * If the portal result contains a command tag and the caller
-				 * gave us a pointer to store it, copy it. Patch the "SELECT"
-				 * tag to also provide the rowcount.
+				 * gave us a pointer to store it, copy it and update the
+				 * rowcount.
 				 */
-				if (completionTag && portal->commandTag)
+				if (qc && portal->qc.commandTag != CMDTAG_UNKNOWN)
 				{
-					if (strcmp(portal->commandTag, "SELECT") == 0)
-						snprintf(completionTag, COMPLETION_TAG_BUFSIZE,
-								 "SELECT " UINT64_FORMAT, nprocessed);
-					else
-						strcpy(completionTag, portal->commandTag);
+					CopyQueryCompletion(qc, &portal->qc);
+					qc->nprocessed = nprocessed;
 				}
 
 				/* Mark portal not active */
@@ -797,7 +777,7 @@ PortalRun(Portal portal, long count, bool isTopLevel, bool run_once,
 
 			case PORTAL_MULTI_QUERY:
 				PortalRunMulti(portal, isTopLevel, false,
-							   dest, altdest, completionTag);
+							   dest, altdest, qc);
 
 				/* Prevent portal's commands from being re-executed */
 				MarkPortalDone(portal);
@@ -1008,16 +988,17 @@ static void
 FillPortalStore(Portal portal, bool isTopLevel)
 {
 	DestReceiver *treceiver;
-	char		completionTag[COMPLETION_TAG_BUFSIZE];
+	QueryCompletion qc;
 
+	InitializeQueryCompletion(&qc);
 	PortalCreateHoldStore(portal);
 	treceiver = CreateDestReceiver(DestTuplestore);
 	SetTuplestoreDestReceiverParams(treceiver,
 									portal->holdStore,
 									portal->holdContext,
-									false);
-
-	completionTag[0] = '\0';
+									false,
+									NULL,
+									NULL);
 
 	switch (portal->strategy)
 	{
@@ -1026,17 +1007,17 @@ FillPortalStore(Portal portal, bool isTopLevel)
 
 			/*
 			 * Run the portal to completion just as for the default
-			 * MULTI_QUERY case, but send the primary query's output to the
-			 * tuplestore.  Auxiliary query outputs are discarded.  Set the
+			 * PORTAL_MULTI_QUERY case, but send the primary query's output to
+			 * the tuplestore.  Auxiliary query outputs are discarded. Set the
 			 * portal's holdSnapshot to the snapshot used (or a copy of it).
 			 */
 			PortalRunMulti(portal, isTopLevel, true,
-						   treceiver, None_Receiver, completionTag);
+						   treceiver, None_Receiver, &qc);
 			break;
 
 		case PORTAL_UTIL_SELECT:
 			PortalRunUtility(portal, linitial_node(PlannedStmt, portal->stmts),
-							 isTopLevel, true, treceiver, completionTag);
+							 isTopLevel, true, treceiver, &qc);
 			break;
 
 		default:
@@ -1045,9 +1026,9 @@ FillPortalStore(Portal portal, bool isTopLevel)
 			break;
 	}
 
-	/* Override default completion tag with actual command result */
-	if (completionTag[0] != '\0')
-		portal->commandTag = pstrdup(completionTag);
+	/* Override portal completion data with actual command results */
+	if (qc.commandTag != CMDTAG_UNKNOWN)
+		CopyQueryCompletion(&portal->qc, &qc);
 
 	treceiver->rDestroy(treceiver);
 }
@@ -1071,7 +1052,7 @@ RunFromStore(Portal portal, ScanDirection direction, uint64 count,
 	uint64		current_tuple_count = 0;
 	TupleTableSlot *slot;
 
-	slot = MakeSingleTupleTableSlot(portal->tupDesc);
+	slot = MakeSingleTupleTableSlot(portal->tupDesc, &TTSOpsMinimalTuple);
 
 	dest->rStartup(dest, CMD_SELECT, portal->tupDesc);
 
@@ -1133,7 +1114,7 @@ RunFromStore(Portal portal, ScanDirection direction, uint64 count,
 static void
 PortalRunUtility(Portal portal, PlannedStmt *pstmt,
 				 bool isTopLevel, bool setHoldSnapshot,
-				 DestReceiver *dest, char *completionTag)
+				 DestReceiver *dest, QueryCompletion *qc)
 {
 	Node	   *utilityStmt = pstmt->utilityStmt;
 	Snapshot	snapshot;
@@ -1181,7 +1162,7 @@ PortalRunUtility(Portal portal, PlannedStmt *pstmt,
 				   portal->portalParams,
 				   portal->queryEnv,
 				   dest,
-				   completionTag);
+				   qc);
 
 	/* Some utility statements may change context on us */
 	MemoryContextSwitchTo(portal->portalContext);
@@ -1205,7 +1186,7 @@ static void
 PortalRunMulti(Portal portal,
 			   bool isTopLevel, bool setHoldSnapshot,
 			   DestReceiver *dest, DestReceiver *altdest,
-			   char *completionTag)
+			   QueryCompletion *qc)
 {
 	bool		active_snapshot_set = false;
 	ListCell   *stmtlist_item;
@@ -1287,7 +1268,7 @@ PortalRunMulti(Portal portal,
 							 portal->sourceText,
 							 portal->portalParams,
 							 portal->queryEnv,
-							 dest, completionTag);
+							 dest, qc);
 			}
 			else
 			{
@@ -1322,7 +1303,7 @@ PortalRunMulti(Portal portal,
 				Assert(!active_snapshot_set);
 				/* statement can set tag string */
 				PortalRunUtility(portal, pstmt, isTopLevel, false,
-								 dest, completionTag);
+								 dest, qc);
 			}
 			else
 			{
@@ -1337,7 +1318,7 @@ PortalRunMulti(Portal portal,
 		 * Increment command counter between queries, but not after the last
 		 * one.
 		 */
-		if (lnext(stmtlist_item) != NULL)
+		if (lnext(portal->stmts, stmtlist_item) != NULL)
 			CommandCounterIncrement();
 
 		/*
@@ -1353,8 +1334,8 @@ PortalRunMulti(Portal portal,
 		PopActiveSnapshot();
 
 	/*
-	 * If a command completion tag was supplied, use it.  Otherwise use the
-	 * portal's commandTag as the default completion tag.
+	 * If a query completion data was supplied, use it.  Otherwise use the
+	 * portal's query completion data.
 	 *
 	 * Exception: Clients expect INSERT/UPDATE/DELETE tags to have counts, so
 	 * fake them with zeros.  This can happen with DO INSTEAD rules if there
@@ -1364,18 +1345,12 @@ PortalRunMulti(Portal portal,
 	 * e.g.  an INSERT that does an UPDATE instead should not print "0 1" if
 	 * one row was updated.  See QueryRewrite(), step 3, for details.
 	 */
-	if (completionTag && completionTag[0] == '\0')
+	if (qc && qc->commandTag == CMDTAG_UNKNOWN)
 	{
-		if (portal->commandTag)
-			strcpy(completionTag, portal->commandTag);
-		if (strcmp(completionTag, "SELECT") == 0)
-			sprintf(completionTag, "SELECT 0 0");
-		else if (strcmp(completionTag, "INSERT") == 0)
-			strcpy(completionTag, "INSERT 0 0");
-		else if (strcmp(completionTag, "UPDATE") == 0)
-			strcpy(completionTag, "UPDATE 0");
-		else if (strcmp(completionTag, "DELETE") == 0)
-			strcpy(completionTag, "DELETE 0");
+		if (portal->qc.commandTag != CMDTAG_UNKNOWN)
+			CopyQueryCompletion(qc, &portal->qc);
+		/* If the caller supplied a qc, we should have set it by now. */
+		Assert(qc->commandTag != CMDTAG_UNKNOWN);
 	}
 }
 

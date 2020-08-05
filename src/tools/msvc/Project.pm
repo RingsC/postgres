@@ -16,12 +16,13 @@ sub _new
 	my $good_types = {
 		lib => 1,
 		exe => 1,
-		dll => 1, };
+		dll => 1,
+	};
 	confess("Bad project type: $type\n") unless exists $good_types->{$type};
 	my $self = {
 		name                  => $name,
 		type                  => $type,
-		guid                  => Win32::GuidGen(),
+		guid                  => $^O eq "MSWin32" ? Win32::GuidGen() : 'FAKE',
 		files                 => {},
 		references            => [],
 		libraries             => [],
@@ -32,7 +33,8 @@ sub _new
 		solution              => $solution,
 		disablewarnings       => '4018;4244;4273;4102;4090;4267',
 		disablelinkerwarnings => '',
-		platform              => $solution->{platform}, };
+		platform              => $solution->{platform},
+	};
 
 	bless($self, $classname);
 	return $self;
@@ -43,6 +45,7 @@ sub AddFile
 	my ($self, $filename) = @_;
 
 	$self->{files}->{$filename} = 1;
+	return;
 }
 
 sub AddFiles
@@ -54,6 +57,7 @@ sub AddFiles
 	{
 		$self->{files}->{ $dir . "/" . $f } = 1;
 	}
+	return;
 }
 
 sub ReplaceFile
@@ -108,6 +112,7 @@ sub RelocateFiles
 			$self->AddFile($targetdir . '/' . basename($f));
 		}
 	}
+	return;
 }
 
 sub AddReference
@@ -120,13 +125,15 @@ sub AddReference
 		$self->AddLibrary(
 			"__CFGNAME__/" . $ref->{name} . "/" . $ref->{name} . ".lib");
 	}
+	return;
 }
 
 sub AddLibrary
 {
 	my ($self, $lib, $dbgsuffix) = @_;
 
-	if ($lib =~ m/\s/)
+	# quote lib name if it has spaces and isn't already quoted
+	if ($lib =~ m/\s/ && $lib !~ m/^[&]quot;/)
 	{
 		$lib = '&quot;' . $lib . "&quot;";
 	}
@@ -136,6 +143,7 @@ sub AddLibrary
 	{
 		push @{ $self->{suffixlib} }, $lib;
 	}
+	return;
 }
 
 sub AddIncludeDir
@@ -147,6 +155,7 @@ sub AddIncludeDir
 		$self->{includes} .= ';';
 	}
 	$self->{includes} .= $inc;
+	return;
 }
 
 sub AddPrefixInclude
@@ -154,6 +163,7 @@ sub AddPrefixInclude
 	my ($self, $inc) = @_;
 
 	$self->{prefixincludes} = $inc . ';' . $self->{prefixincludes};
+	return;
 }
 
 sub AddDefine
@@ -162,6 +172,7 @@ sub AddDefine
 
 	$def =~ s/"/&quot;&quot;/g;
 	$self->{defines} .= $def . ';';
+	return;
 }
 
 sub FullExportDLL
@@ -171,6 +182,7 @@ sub FullExportDLL
 	$self->{builddef} = 1;
 	$self->{def}      = "./__CFGNAME__/$self->{name}/$self->{name}.def";
 	$self->{implib}   = "__CFGNAME__/$self->{name}/$libname";
+	return;
 }
 
 sub UseDef
@@ -178,6 +190,7 @@ sub UseDef
 	my ($self, $def) = @_;
 
 	$self->{def} = $def;
+	return;
 }
 
 sub AddDir
@@ -192,7 +205,7 @@ sub AddDir
 		{
 			next
 			  if $subdir eq "\$(top_builddir)/src/timezone"
-			;    #special case for non-standard include
+			  ;    #special case for non-standard include
 			next
 			  if $reldir . "/" . $subdir eq "src/backend/port/darwin";
 
@@ -217,8 +230,8 @@ sub AddDir
 
 				if ($filter eq "LIBOBJS")
 				{
-					if (grep(/$p/, @main::pgportfiles, @main::pgcommonfiles)
-						== 1)
+					no warnings qw(once);
+					if (grep(/$p/, @main::pgportfiles) == 1)
 					{
 						$p =~ s/\.c/\.o/;
 						$matches .= $p . " ";
@@ -282,6 +295,7 @@ sub AddDir
 	}
 
 	$self->AddDirResourceFile($reldir);
+	return;
 }
 
 # If the directory's Makefile bears a description string, add a resource file.
@@ -297,6 +311,7 @@ sub AddDirResourceFile
 		if ($mf =~ /^PGAPPICON\s*=\s*(.*)$/m) { $ico = $1; }
 		$self->AddResourceFile($reldir, $desc, $ico);
 	}
+	return;
 }
 
 sub AddResourceFile
@@ -323,6 +338,14 @@ sub AddResourceFile
 			if ($self->{type} eq "dll")
 			{
 				s/VFT_APP/VFT_DLL/gm;
+				my $name = $self->{name};
+				s/_INTERNAL_NAME_/"$name"/;
+				s/_ORIGINAL_NAME_/"$name.dll"/;
+			}
+			else
+			{
+				/_INTERNAL_NAME_/ && next;
+				/_ORIGINAL_NAME_/ && next;
 			}
 			print $o $_;
 		}
@@ -330,6 +353,7 @@ sub AddResourceFile
 		close($i);
 	}
 	$self->AddFile("$dir/win32ver.rc");
+	return;
 }
 
 sub DisableLinkerWarnings
@@ -339,21 +363,22 @@ sub DisableLinkerWarnings
 	$self->{disablelinkerwarnings} .= ','
 	  unless ($self->{disablelinkerwarnings} eq '');
 	$self->{disablelinkerwarnings} .= $warnings;
+	return;
 }
 
 sub Save
 {
 	my ($self) = @_;
 
-# If doing DLL and haven't specified a DEF file, do a full export of all symbols
-# in the project.
+	# If doing DLL and haven't specified a DEF file, do a full export of all symbols
+	# in the project.
 	if ($self->{type} eq "dll" && !$self->{def})
 	{
 		$self->FullExportDLL($self->{name} . ".lib");
 	}
 
-# Warning 4197 is about double exporting, disable this per
-# http://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=99193
+	# Warning 4197 is about double exporting, disable this per
+	# http://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=99193
 	$self->DisableLinkerWarnings('4197') if ($self->{platform} eq 'x64');
 
 	# Dump the project
@@ -364,6 +389,7 @@ sub Save
 	$self->WriteFiles($f);
 	$self->Footer($f);
 	close($f);
+	return;
 }
 
 sub GetAdditionalLinkerDependencies
@@ -394,13 +420,10 @@ sub read_file
 {
 	my $filename = shift;
 	my $F;
-	my $t = $/;
-
-	undef $/;
+	local $/ = undef;
 	open($F, '<', $filename) || croak "Could not open file $filename\n";
 	my $txt = <$F>;
 	close($F);
-	$/ = $t;
 
 	return $txt;
 }
@@ -409,15 +432,12 @@ sub read_makefile
 {
 	my $reldir = shift;
 	my $F;
-	my $t = $/;
-
-	undef $/;
+	local $/ = undef;
 	open($F, '<', "$reldir/GNUmakefile")
 	  || open($F, '<', "$reldir/Makefile")
 	  || confess "Could not open $reldir/Makefile\n";
 	my $txt = <$F>;
 	close($F);
-	$/ = $t;
 
 	return $txt;
 }

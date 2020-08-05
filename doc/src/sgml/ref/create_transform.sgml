@@ -1,4 +1,7 @@
-<!-- doc/src/sgml/ref/create_transform.sgml -->
+<!--
+doc/src/sgml/ref/create_transform.sgml
+PostgreSQL documentation
+-->
 
 <refentry id="sql-createtransform">
  <indexterm zone="sql-createtransform">
@@ -157,7 +160,7 @@ CREATE [ OR REPLACE ] TRANSFORM FOR <replaceable>type_name</replaceable> LANGUAG
 <programlisting>
 CREATE TYPE hstore ...;
 
-CREATE LANGUAGE plpythonu ...;
+CREATE EXTENSION plpythonu;
 </programlisting>
    Then create the necessary functions:
 <programlisting>
@@ -176,7 +179,7 @@ CREATE TRANSFORM FOR hstore LANGUAGE plpythonu (
     TO SQL WITH FUNCTION plpython_to_hstore(internal)
 );
 </programlisting>
-   In practice, these commands would be wrapped up in extensions.
+   In practice, these commands would be wrapped up in an extension.
   </para>
 
   <para>

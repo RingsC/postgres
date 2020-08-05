@@ -30,10 +30,9 @@ ok(-f "$pgdata/$baseUnloggedPath",        'main fork in base exists');
 
 my $tablespaceDir = TestLib::tempdir;
 
-my $realTSDir = TestLib::real_dir($tablespaceDir);
+my $realTSDir = TestLib::perl2host($tablespaceDir);
 
-$node->safe_psql('postgres',
-	"CREATE TABLESPACE ts1 LOCATION '$realTSDir'");
+$node->safe_psql('postgres', "CREATE TABLESPACE ts1 LOCATION '$realTSDir'");
 $node->safe_psql('postgres',
 	'CREATE UNLOGGED TABLE ts1_unlogged (id int) TABLESPACE ts1');
 
@@ -64,11 +63,9 @@ unlink("$pgdata/${ts1UnloggedPath}")
 $node->start;
 
 # check unlogged table in base
-ok(-f "$pgdata/${baseUnloggedPath}_init",
-	'init fork in base still exists');
-ok(-f "$pgdata/$baseUnloggedPath",
-	'main fork in base recreated at startup');
-ok( !-f "$pgdata/${baseUnloggedPath}_vm",
+ok(-f "$pgdata/${baseUnloggedPath}_init", 'init fork in base still exists');
+ok(-f "$pgdata/$baseUnloggedPath", 'main fork in base recreated at startup');
+ok(!-f "$pgdata/${baseUnloggedPath}_vm",
 	'vm fork in base removed at startup');
 ok( !-f "$pgdata/${baseUnloggedPath}_fsm",
 	'fsm fork in base removed at startup');

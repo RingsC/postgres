@@ -9,7 +9,7 @@ PostgreSQL documentation
  </indexterm>
 
  <refmeta>
-  <refentrytitle>pg_dump</refentrytitle>
+  <refentrytitle><application>pg_dump</application></refentrytitle>
   <manvolnum>1</manvolnum>
   <refmiscinfo>Application</refmiscinfo>
  </refmeta>
@@ -33,9 +33,7 @@ PostgreSQL documentation
 
 
  <refsect1 id="pg-dump-description">
-  <title>
-   Description
-  </title>
+  <title>Description</title>
 
   <para>
    <application>pg_dump</application> is a utility for backing up a
@@ -82,7 +80,7 @@ PostgreSQL documentation
    can be used to examine the archive and/or select which parts of the
    database are to be restored. The most flexible output file formats are
    the <quote>custom</quote> format (<option>-Fc</option>) and the
-   <quote>directory</quote> format(<option>-Fd</option>). They allow
+   <quote>directory</quote> format (<option>-Fd</option>). They allow
    for selection and reordering of all archived items, support parallel
    restoration, and are compressed by default. The <quote>directory</quote>
    format is the only format that supports parallel dumps.
@@ -225,7 +223,8 @@ PostgreSQL documentation
         Create the dump in the specified character set encoding. By default,
         the dump is created in the database encoding.  (Another way to get the
         same result is to set the <envar>PGCLIENTENCODING</envar> environment
-        variable to the desired dump encoding.)
+        variable to the desired dump encoding.)  The supported encodings are
+        described in <xref linkend="multibyte-charset-supported"/>.
        </para>
       </listitem>
      </varlistentry>
@@ -334,12 +333,12 @@ PostgreSQL documentation
        </para>
        <para>
         Requesting exclusive locks on database objects while running a parallel dump could
-        cause the dump to fail. The reason is that the <application>pg_dump</application> master process
+        cause the dump to fail. The reason is that the <application>pg_dump</application> leader process
         requests shared locks on the objects that the worker processes are going to dump later
         in order to
         make sure that nobody deletes them and makes them go away while the dump is running.
         If another client then requests an exclusive lock on a table, that lock will not be
-        granted but will be queued waiting for the shared lock of the master process to be
+        granted but will be queued waiting for the shared lock of the leader process to be
         released. Consequently any other access to the table will not be granted either and
         will queue after the exclusive lock request. This includes the worker process trying
         to dump the table. Without any precautions this would be a classic deadlock situation.
@@ -356,14 +355,14 @@ PostgreSQL documentation
         for standbys. With this feature, database clients can ensure they see
         the same data set even though they use different connections.
         <command>pg_dump -j</command> uses multiple database connections; it
-        connects to the database once with the master process and once again
+        connects to the database once with the leader process and once again
         for each worker job. Without the synchronized snapshot feature, the
         different worker jobs wouldn't be guaranteed to see the same data in
         each connection, which could lead to an inconsistent backup.
        </para>
        <para>
         If you want to run a parallel dump of a pre-9.2 server, you need to make sure that the
-        database content doesn't change from between the time the master connects to the
+        database content doesn't change from between the time the leader connects to the
         database until the last worker job has connected to the database. The easiest way to
         do this is to halt any data modifying processes (DDL and DML) accessing the database
         before starting the backup. You also need to specify the
@@ -375,24 +374,24 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>-n <replaceable class="parameter">schema</replaceable></option></term>
-      <term><option>--schema=<replaceable class="parameter">schema</replaceable></option></term>
+      <term><option>-n <replaceable class="parameter">pattern</replaceable></option></term>
+      <term><option>--schema=<replaceable class="parameter">pattern</replaceable></option></term>
       <listitem>
        <para>
         Dump only schemas matching <replaceable
-        class="parameter">schema</replaceable>; this selects both the
+        class="parameter">pattern</replaceable>; this selects both the
         schema itself, and all its contained objects.  When this option is
         not specified, all non-system schemas in the target database will be
         dumped.  Multiple schemas can be
-        selected by writing multiple <option>-n</option> switches.  Also, the
-        <replaceable class="parameter">schema</replaceable> parameter is
+        selected by writing multiple <option>-n</option> switches.  The
+        <replaceable class="parameter">pattern</replaceable> parameter is
         interpreted as a pattern according to the same rules used by
-        <application>psql</application>'s <literal>\d</literal> commands (see <xref
-        linkend="app-psql-patterns" endterm="app-psql-patterns-title"/>),
+        <application>psql</application>'s <literal>\d</literal> commands
+        (see <xref linkend="app-psql-patterns"/> below),
         so multiple schemas can also be selected by writing wildcard characters
         in the pattern.  When using wildcards, be careful to quote the pattern
         if needed to prevent the shell from expanding the wildcards;  see
-        <xref linkend="pg-dump-examples" endterm="pg-dump-examples-title"/>.
+        <xref linkend="pg-dump-examples"/> below.
        </para>
 
        <note>
@@ -417,12 +416,12 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>-N <replaceable class="parameter">schema</replaceable></option></term>
-      <term><option>--exclude-schema=<replaceable class="parameter">schema</replaceable></option></term>
+      <term><option>-N <replaceable class="parameter">pattern</replaceable></option></term>
+      <term><option>--exclude-schema=<replaceable class="parameter">pattern</replaceable></option></term>
       <listitem>
        <para>
-        Do not dump any schemas matching the <replaceable
-        class="parameter">schema</replaceable> pattern.  The pattern is
+        Do not dump any schemas matching <replaceable
+        class="parameter">pattern</replaceable>.  The pattern is
         interpreted according to the same rules as for <option>-n</option>.
         <option>-N</option> can be given more than once to exclude schemas
         matching any of several patterns.
@@ -434,20 +433,6 @@ PostgreSQL documentation
         switch but no <option>-N</option> switches.  If <option>-N</option> appears
         without <option>-n</option>, then schemas matching <option>-N</option> are
         excluded from what is otherwise a normal dump.
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
-      <term><option>-o</option></term>
-      <term><option>--oids</option></term>
-      <listitem>
-       <para>
-        Dump object identifiers (<acronym>OID</acronym>s) as part of the
-        data for every table.  Use this option if your application references
-        the <acronym>OID</acronym>
-        columns in some way (e.g., in a foreign key constraint).
-        Otherwise, this option should not be used.
        </para>
       </listitem>
      </varlistentry>
@@ -527,23 +512,23 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>-t <replaceable class="parameter">table</replaceable></option></term>
-      <term><option>--table=<replaceable class="parameter">table</replaceable></option></term>
+      <term><option>-t <replaceable class="parameter">pattern</replaceable></option></term>
+      <term><option>--table=<replaceable class="parameter">pattern</replaceable></option></term>
       <listitem>
        <para>
         Dump only tables with names matching
-        <replaceable class="parameter">table</replaceable>.
+        <replaceable class="parameter">pattern</replaceable>.
         For this purpose, <quote>table</quote> includes views, materialized views,
         sequences, and foreign tables.  Multiple tables
-        can be selected by writing multiple <option>-t</option> switches.  Also, the
-        <replaceable class="parameter">table</replaceable> parameter is
+        can be selected by writing multiple <option>-t</option> switches.  The
+        <replaceable class="parameter">pattern</replaceable> parameter is
         interpreted as a pattern according to the same rules used by
-        <application>psql</application>'s <literal>\d</literal> commands (see <xref
-        linkend="app-psql-patterns" endterm="app-psql-patterns-title"/>),
+        <application>psql</application>'s <literal>\d</literal> commands
+        (see <xref linkend="app-psql-patterns"/> below),
         so multiple tables can also be selected by writing wildcard characters
         in the pattern.  When using wildcards, be careful to quote the pattern
         if needed to prevent the shell from expanding the wildcards;  see
-        <xref linkend="pg-dump-examples" endterm="pg-dump-examples-title"/>.
+        <xref linkend="pg-dump-examples"/> below.
        </para>
 
        <para>
@@ -579,12 +564,12 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>-T <replaceable class="parameter">table</replaceable></option></term>
-      <term><option>--exclude-table=<replaceable class="parameter">table</replaceable></option></term>
+      <term><option>-T <replaceable class="parameter">pattern</replaceable></option></term>
+      <term><option>--exclude-table=<replaceable class="parameter">pattern</replaceable></option></term>
       <listitem>
        <para>
-        Do not dump any tables matching the <replaceable
-        class="parameter">table</replaceable> pattern.  The pattern is
+        Do not dump any tables matching <replaceable
+        class="parameter">pattern</replaceable>.  The pattern is
         interpreted according to the same rules as for <option>-t</option>.
         <option>-T</option> can be given more than once to exclude tables
         matching any of several patterns.
@@ -675,9 +660,9 @@ PostgreSQL documentation
         ...</literal>).  This will make restoration very slow; it is mainly
         useful for making dumps that can be loaded into
         non-<productname>PostgreSQL</productname> databases.
-        However, since this option generates a separate command for each row,
-        an error in reloading a row causes only that row to be lost rather
-        than the entire table contents.
+        Any error during reloading will cause only rows that are part of the
+        problematic <command>INSERT</command> to be lost, rather than the
+        entire table contents.
        </para>
       </listitem>
      </varlistentry>
@@ -742,11 +727,11 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>--exclude-table-data=<replaceable class="parameter">table</replaceable></option></term>
+      <term><option>--exclude-table-data=<replaceable class="parameter">pattern</replaceable></option></term>
       <listitem>
        <para>
-        Do not dump data for any tables matching the <replaceable
-        class="parameter">table</replaceable> pattern. The pattern is
+        Do not dump data for any tables matching <replaceable
+        class="parameter">pattern</replaceable>. The pattern is
         interpreted according to the same rules as for <option>-t</option>.
         <option>--exclude-table-data</option> can be given more than once to
         exclude tables matching any of several patterns. This option is
@@ -755,6 +740,17 @@ PostgreSQL documentation
        </para>
        <para>
         To exclude data for all tables in the database, see <option>--schema-only</option>.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--extra-float-digits=<replaceable class="parameter">ndigits</replaceable></option></term>
+      <listitem>
+       <para>
+        Use the specified value of <option>extra_float_digits</option> when dumping
+        floating-point data, instead of the maximum available precision.
+        Routine dumps made for backup purposes should not use this option.
        </para>
       </listitem>
      </varlistentry>
@@ -771,6 +767,36 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--include-foreign-data=<replaceable class="parameter">foreignserver</replaceable></option></term>
+      <listitem>
+       <para>
+        Dump the data for any foreign table with a foreign server
+        matching <replaceable class="parameter">foreignserver</replaceable>
+        pattern. Multiple foreign servers can be selected by writing multiple
+        <option>--include-foreign-data</option> switches.
+        Also, the <replaceable class="parameter">foreignserver</replaceable> parameter is
+        interpreted as a pattern according to the same rules used by
+        <application>psql</application>'s <literal>\d</literal> commands
+        (see <xref linkend="app-psql-patterns"/> below),
+        so multiple foreign servers can also be selected by writing wildcard characters
+        in the pattern.  When using wildcards, be careful to quote the pattern
+        if needed to prevent the shell from expanding the wildcards; see
+        <xref linkend="pg-dump-examples"/> below.
+        The only exception is that an empty pattern is disallowed.
+       </para>
+
+       <note>
+        <para>
+         When <option>--include-foreign-data</option> is specified,
+         <application>pg_dump</application> does not check that the foreign
+         table is writable.  Therefore, there is no guarantee that the
+         results of a foreign table dump can be successfully restored.
+        </para>
+       </note>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--inserts</option></term>
       <listitem>
        <para>
@@ -778,13 +804,40 @@ PostgreSQL documentation
         than <command>COPY</command>).  This will make restoration very slow;
         it is mainly useful for making dumps that can be loaded into
         non-<productname>PostgreSQL</productname> databases.
-        However, since this option generates a separate command for each row,
-        an error in reloading a row causes only that row to be lost rather
-        than the entire table contents.
-        Note that
-        the restore might fail altogether if you have rearranged column order.
-        The <option>--column-inserts</option> option is safe against column
-        order changes, though even slower.
+        Any error during reloading will cause only rows that are part of the
+        problematic <command>INSERT</command> to be lost, rather than the
+        entire table contents.  Note that the restore might fail altogether if
+        you have rearranged column order.  The
+        <option>--column-inserts</option> option is safe against column order
+        changes, though even slower.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--load-via-partition-root</option></term>
+      <listitem>
+       <para>
+        When dumping data for a table partition, make
+        the <command>COPY</command> or <command>INSERT</command> statements
+        target the root of the partitioning hierarchy that contains it, rather
+        than the partition itself.  This causes the appropriate partition to
+        be re-determined for each row when the data is loaded.  This may be
+        useful when reloading data on a server where rows do not always fall
+        into the same partitions as they did on the original server.  That
+        could happen, for example, if the partitioning column is of type text
+        and the two systems have different definitions of the collation used
+        to sort the partitioning column.
+       </para>
+
+       <para>
+        It is best not to use parallelism when restoring from an archive made
+        with this option, because <application>pg_restore</application> will
+        not know exactly which partition(s) a given archive data item will
+        load data into.  This could result in inefficiency due to lock
+        conflicts between parallel jobs, or perhaps even reload failures due
+        to foreign key constraints being set up before all the relevant data
+        is loaded.
        </para>
       </listitem>
      </varlistentry>
@@ -895,6 +948,19 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--on-conflict-do-nothing</option></term>
+      <listitem>
+       <para>
+        Add <literal>ON CONFLICT DO NOTHING</literal> to
+        <command>INSERT</command> commands.
+        This option is not valid unless <option>--inserts</option>,
+        <option>--column-inserts</option> or
+        <option>--rows-per-insert</option> is also specified.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--quote-all-identifiers</option></term>
       <listitem>
        <para>
@@ -913,16 +979,15 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
-      <term><option>--load-via-partition-root</option></term>
+      <term><option>--rows-per-insert=<replaceable class="parameter">nrows</replaceable></option></term>
       <listitem>
        <para>
-        When dumping a COPY or INSERT statement for a partitioned table,
-        target the root of the partitioning hierarchy which contains it rather
-        than the partition itself.  This may be useful when reloading data on
-        a server where rows do not always fall into the same partitions as
-        they did on the original server.  This could happen, for example, if
-        the partitioning column is of type text and the two system have
-        different definitions of the collation used to partition the data.
+        Dump data as <command>INSERT</command> commands (rather than
+        <command>COPY</command>).  Controls the maximum number of rows per
+        <command>INSERT</command> command. The value specified must be a
+        number greater than zero.  Any error during reloading will cause only
+        rows that are part of the problematic <command>INSERT</command> to be
+        lost, rather than the entire table contents.
        </para>
       </listitem>
      </varlistentry>
@@ -1188,6 +1253,17 @@ PostgreSQL documentation
     </listitem>
 
    </varlistentry>
+
+   <varlistentry>
+    <term><envar>PG_COLOR</envar></term>
+    <listitem>
+     <para>
+      Specifies whether to use color in diagnostic messages. Possible values
+      are <literal>always</literal>, <literal>auto</literal> and
+      <literal>never</literal>.
+     </para>
+    </listitem>
+   </varlistentry>
   </variablelist>
 
   <para>
@@ -1279,7 +1355,7 @@ CREATE DATABASE foo WITH TEMPLATE template0;
   <para>
    When dumping logical replication subscriptions,
    <application>pg_dump</application> will generate <command>CREATE
-   SUBSCRIPTION</command> commands that use the <literal>NOCONNECT</literal>
+   SUBSCRIPTION</command> commands that use the <literal>connect = false</literal>
    option, so that restoring the subscription does not make remote connections
    for creating a replication slot or for initial table copy.  That way, the
    dump can be restored without requiring network access to the remote
@@ -1290,8 +1366,8 @@ CREATE DATABASE foo WITH TEMPLATE template0;
   </para>
  </refsect1>
 
- <refsect1 id="pg-dump-examples">
-  <title id="pg-dump-examples-title">Examples</title>
+ <refsect1 id="pg-dump-examples" xreflabel="Examples">
+  <title>Examples</title>
 
   <para>
    To dump a database called <literal>mydb</literal> into a SQL-script file:
@@ -1400,8 +1476,7 @@ CREATE DATABASE foo WITH TEMPLATE template0;
   <para>
    To specify an upper-case or mixed-case name in <option>-t</option> and related
    switches, you need to double-quote the name; else it will be folded to
-   lower case (see <xref
-   linkend="app-psql-patterns" endterm="app-psql-patterns-title"/>).  But
+   lower case (see <xref linkend="app-psql-patterns"/> below).  But
    double quotes are special to the shell, so in turn they must be quoted.
    Thus, to dump a single table with a mixed-case name, you need something
    like

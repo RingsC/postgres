@@ -1,10 +1,11 @@
 # contrib/hstore_plperl/Makefile
 
 MODULE_big = hstore_plperl
-OBJS = hstore_plperl.o $(WIN32RES)
+OBJS = \
+	$(WIN32RES) \
+	hstore_plperl.o
 PGFILEDESC = "hstore_plperl - hstore transform for plperl"
 
-PG_CPPFLAGS = -I$(top_srcdir)/src/pl/plperl -I$(top_srcdir)/contrib/hstore
 
 EXTENSION = hstore_plperl hstore_plperlu
 DATA = hstore_plperl--1.0.sql hstore_plperlu--1.0.sql
@@ -13,10 +14,12 @@ REGRESS = hstore_plperl hstore_plperlu create_transform
 EXTRA_INSTALL = contrib/hstore
 
 ifdef USE_PGXS
+PG_CPPFLAGS = -I$(includedir_server)/extension
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 else
+PG_CPPFLAGS = -I$(top_srcdir)/src/pl/plperl -I$(top_srcdir)/contrib
 subdir = contrib/hstore_plperl
 top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
@@ -34,8 +37,5 @@ rpathdir = $(perl_archlibexp)/CORE
 SHLIB_LINK += $(perl_embed_ldflags)
 endif
 
-# As with plperl we need to make sure that the CORE directory is included
-# last, probably because it sometimes contains some header files with names
-# that clash with some of ours, or with some that we include, notably on
-# Windows.
-override CPPFLAGS := $(CPPFLAGS) $(perl_embed_ccflags) -I$(perl_archlibexp)/CORE
+# As with plperl we need to include the perl_includespec directory last.
+override CPPFLAGS := $(CPPFLAGS) $(perl_embed_ccflags) $(perl_includespec)

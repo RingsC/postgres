@@ -3,7 +3,7 @@
  * pg_crc32c_armv8.c
  *	  Compute CRC-32C checksum using ARMv8 CRC Extension instructions
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,9 +14,9 @@
  */
 #include "c.h"
 
-#include "port/pg_crc32c.h"
-
 #include <arm_acle.h>
+
+#include "port/pg_crc32c.h"
 
 pg_crc32c
 pg_comp_crc32c_armv8(pg_crc32c crc, const void *data, size_t len)
@@ -29,17 +29,20 @@ pg_comp_crc32c_armv8(pg_crc32c crc, const void *data, size_t len)
 	 * significantly faster. Process leading bytes so that the loop below
 	 * starts with a pointer aligned to eight bytes.
 	 */
-	if (!PointerIsAligned(p, uint16) && p + 1 <= pend)
+	if (!PointerIsAligned(p, uint16) &&
+		p + 1 <= pend)
 	{
 		crc = __crc32cb(crc, *p);
 		p += 1;
 	}
-	if (!PointerIsAligned(p, uint32) && p + 2 <= pend)
+	if (!PointerIsAligned(p, uint32) &&
+		p + 2 <= pend)
 	{
 		crc = __crc32ch(crc, *(uint16 *) p);
 		p += 2;
 	}
-	if (!PointerIsAligned(p, uint64) && p + 4 <= pend)
+	if (!PointerIsAligned(p, uint64) &&
+		p + 4 <= pend)
 	{
 		crc = __crc32cw(crc, *(uint32 *) p);
 		p += 4;

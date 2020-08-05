@@ -1,6 +1,6 @@
 #! /usr/bin/perl
 #
-# Copyright (c) 2001-2018, PostgreSQL Global Development Group
+# Copyright (c) 2001-2020, PostgreSQL Global Development Group
 #
 # src/backend/utils/mb/Unicode/UCS_to_EUC_TW.pl
 #
@@ -18,6 +18,8 @@
 #		 # and Unicode name (not used in this script)
 
 use strict;
+use warnings;
+
 use convutils;
 
 my $this_script = 'src/backend/utils/mb/Unicode/UCS_to_EUC_TW.pl';
@@ -53,12 +55,14 @@ foreach my $i (@$mapping)
 	if ($origcode >= 0x12121 && $origcode <= 0x20000)
 	{
 		push @extras,
-		  { ucs       => $i->{ucs},
+		  {
+			ucs       => $i->{ucs},
 			code      => ($i->{code} + 0x8ea10000),
 			rest      => $i->{rest},
 			direction => TO_UNICODE,
 			f         => $i->{f},
-			l         => $i->{l} };
+			l         => $i->{l}
+		  };
 	}
 }
 

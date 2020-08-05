@@ -3,7 +3,7 @@
  * lmgr.c
  *	  POSTGRES lock manager code
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,9 +19,12 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/catalog.h"
+#include "commands/progress.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "storage/lmgr.h"
 #include "storage/procarray.h"
+#include "storage/sinvaladt.h"
 #include "utils/inval.h"
 
 
@@ -105,11 +108,12 @@ void
 LockRelationOid(Oid relid, LOCKMODE lockmode)
 {
 	LOCKTAG		tag;
+	LOCALLOCK  *locallock;
 	LockAcquireResult res;
 
 	SetLocktagRelationOid(&tag, relid);
 
-	res = LockAcquire(&tag, lockmode, false, false);
+	res = LockAcquireExtended(&tag, lockmode, false, false, true, &locallock);
 
 	/*
 	 * Now that we have the lock, check for invalidation messages, so that we
@@ -120,9 +124,18 @@ LockRelationOid(Oid relid, LOCKMODE lockmode)
 	 * relcache entry in an undesirable way.  (In the case where our own xact
 	 * modifies the rel, the relcache update happens via
 	 * CommandCounterIncrement, not here.)
+	 *
+	 * However, in corner cases where code acts on tables (usually catalogs)
+	 * recursively, we might get here while still processing invalidation
+	 * messages in some outer execution of this function or a sibling.  The
+	 * "cleared" status of the lock tells us whether we really are done
+	 * absorbing relevant inval messages.
 	 */
-	if (res != LOCKACQUIRE_ALREADY_HELD)
+	if (res != LOCKACQUIRE_ALREADY_CLEAR)
+	{
 		AcceptInvalidationMessages();
+		MarkLockClear(locallock);
+	}
 }
 
 /*
@@ -138,11 +151,12 @@ bool
 ConditionalLockRelationOid(Oid relid, LOCKMODE lockmode)
 {
 	LOCKTAG		tag;
+	LOCALLOCK  *locallock;
 	LockAcquireResult res;
 
 	SetLocktagRelationOid(&tag, relid);
 
-	res = LockAcquire(&tag, lockmode, false, true);
+	res = LockAcquireExtended(&tag, lockmode, false, true, true, &locallock);
 
 	if (res == LOCKACQUIRE_NOT_AVAIL)
 		return false;
@@ -151,8 +165,11 @@ ConditionalLockRelationOid(Oid relid, LOCKMODE lockmode)
 	 * Now that we have the lock, check for invalidation messages; see notes
 	 * in LockRelationOid.
 	 */
-	if (res != LOCKACQUIRE_ALREADY_HELD)
+	if (res != LOCKACQUIRE_ALREADY_CLEAR)
+	{
 		AcceptInvalidationMessages();
+		MarkLockClear(locallock);
+	}
 
 	return true;
 }
@@ -199,20 +216,24 @@ void
 LockRelation(Relation relation, LOCKMODE lockmode)
 {
 	LOCKTAG		tag;
+	LOCALLOCK  *locallock;
 	LockAcquireResult res;
 
 	SET_LOCKTAG_RELATION(tag,
 						 relation->rd_lockInfo.lockRelId.dbId,
 						 relation->rd_lockInfo.lockRelId.relId);
 
-	res = LockAcquire(&tag, lockmode, false, false);
+	res = LockAcquireExtended(&tag, lockmode, false, false, true, &locallock);
 
 	/*
 	 * Now that we have the lock, check for invalidation messages; see notes
 	 * in LockRelationOid.
 	 */
-	if (res != LOCKACQUIRE_ALREADY_HELD)
+	if (res != LOCKACQUIRE_ALREADY_CLEAR)
+	{
 		AcceptInvalidationMessages();
+		MarkLockClear(locallock);
+	}
 }
 
 /*
@@ -226,13 +247,14 @@ bool
 ConditionalLockRelation(Relation relation, LOCKMODE lockmode)
 {
 	LOCKTAG		tag;
+	LOCALLOCK  *locallock;
 	LockAcquireResult res;
 
 	SET_LOCKTAG_RELATION(tag,
 						 relation->rd_lockInfo.lockRelId.dbId,
 						 relation->rd_lockInfo.lockRelId.relId);
 
-	res = LockAcquire(&tag, lockmode, false, true);
+	res = LockAcquireExtended(&tag, lockmode, false, true, true, &locallock);
 
 	if (res == LOCKACQUIRE_NOT_AVAIL)
 		return false;
@@ -241,8 +263,11 @@ ConditionalLockRelation(Relation relation, LOCKMODE lockmode)
 	 * Now that we have the lock, check for invalidation messages; see notes
 	 * in LockRelationOid.
 	 */
-	if (res != LOCKACQUIRE_ALREADY_HELD)
+	if (res != LOCKACQUIRE_ALREADY_CLEAR)
+	{
 		AcceptInvalidationMessages();
+		MarkLockClear(locallock);
+	}
 
 	return true;
 }
@@ -263,6 +288,51 @@ UnlockRelation(Relation relation, LOCKMODE lockmode)
 						 relation->rd_lockInfo.lockRelId.relId);
 
 	LockRelease(&tag, lockmode, false);
+}
+
+/*
+ *		CheckRelationLockedByMe
+ *
+ * Returns true if current transaction holds a lock on 'relation' of mode
+ * 'lockmode'.  If 'orstronger' is true, a stronger lockmode is also OK.
+ * ("Stronger" is defined as "numerically higher", which is a bit
+ * semantically dubious but is OK for the purposes we use this for.)
+ */
+bool
+CheckRelationLockedByMe(Relation relation, LOCKMODE lockmode, bool orstronger)
+{
+	LOCKTAG		tag;
+
+	SET_LOCKTAG_RELATION(tag,
+						 relation->rd_lockInfo.lockRelId.dbId,
+						 relation->rd_lockInfo.lockRelId.relId);
+
+	if (LockHeldByMe(&tag, lockmode))
+		return true;
+
+	if (orstronger)
+	{
+		LOCKMODE	slockmode;
+
+		for (slockmode = lockmode + 1;
+			 slockmode <= MaxLockMode;
+			 slockmode++)
+		{
+			if (LockHeldByMe(&tag, slockmode))
+			{
+#ifdef NOT_USED
+				/* Sometimes this might be useful for debugging purposes */
+				elog(WARNING, "lock mode %s substituted for %s on relation %s",
+					 GetLockmodeName(tag.locktag_lockmethodid, slockmode),
+					 GetLockmodeName(tag.locktag_lockmethodid, lockmode),
+					 RelationGetRelationName(relation));
+#endif
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 /*
@@ -722,7 +792,7 @@ SpeculativeInsertionWait(TransactionId xid, uint32 token)
 }
 
 /*
- * XactLockTableWaitErrorContextCb
+ * XactLockTableWaitErrorCb
  *		Error context callback for transaction lock waits.
  */
 static void
@@ -790,10 +860,12 @@ XactLockTableWaitErrorCb(void *arg)
  * after we obtained our initial list of lockers, we will not wait for them.
  */
 void
-WaitForLockersMultiple(List *locktags, LOCKMODE lockmode)
+WaitForLockersMultiple(List *locktags, LOCKMODE lockmode, bool progress)
 {
 	List	   *holders = NIL;
 	ListCell   *lc;
+	int			total = 0;
+	int			done = 0;
 
 	/* Done if no locks to wait for */
 	if (list_length(locktags) == 0)
@@ -803,9 +875,17 @@ WaitForLockersMultiple(List *locktags, LOCKMODE lockmode)
 	foreach(lc, locktags)
 	{
 		LOCKTAG    *locktag = lfirst(lc);
+		int			count;
 
-		holders = lappend(holders, GetLockConflicts(locktag, lockmode));
+		holders = lappend(holders,
+						  GetLockConflicts(locktag, lockmode,
+										   progress ? &count : NULL));
+		if (progress)
+			total += count;
 	}
+
+	if (progress)
+		pgstat_progress_update_param(PROGRESS_WAITFOR_TOTAL, total);
 
 	/*
 	 * Note: GetLockConflicts() never reports our own xid, hence we need not
@@ -820,9 +900,34 @@ WaitForLockersMultiple(List *locktags, LOCKMODE lockmode)
 
 		while (VirtualTransactionIdIsValid(*lockholders))
 		{
+			/* If requested, publish who we're going to wait for. */
+			if (progress)
+			{
+				PGPROC	   *holder = BackendIdGetProc(lockholders->backendId);
+
+				if (holder)
+					pgstat_progress_update_param(PROGRESS_WAITFOR_CURRENT_PID,
+												 holder->pid);
+			}
 			VirtualXactLock(*lockholders, true);
 			lockholders++;
+
+			if (progress)
+				pgstat_progress_update_param(PROGRESS_WAITFOR_DONE, ++done);
 		}
+	}
+	if (progress)
+	{
+		const int	index[] = {
+			PROGRESS_WAITFOR_TOTAL,
+			PROGRESS_WAITFOR_DONE,
+			PROGRESS_WAITFOR_CURRENT_PID
+		};
+		const int64 values[] = {
+			0, 0, 0
+		};
+
+		pgstat_progress_update_multi_param(3, index, values);
 	}
 
 	list_free_deep(holders);
@@ -834,12 +939,12 @@ WaitForLockersMultiple(List *locktags, LOCKMODE lockmode)
  * Same as WaitForLockersMultiple, for a single lock tag.
  */
 void
-WaitForLockers(LOCKTAG heaplocktag, LOCKMODE lockmode)
+WaitForLockers(LOCKTAG heaplocktag, LOCKMODE lockmode, bool progress)
 {
 	List	   *l;
 
 	l = list_make1(&heaplocktag);
-	WaitForLockersMultiple(l, lockmode);
+	WaitForLockersMultiple(l, lockmode, progress);
 	list_free(l);
 }
 

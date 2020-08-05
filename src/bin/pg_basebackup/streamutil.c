@@ -1,11 +1,11 @@
 /*-------------------------------------------------------------------------
  *
  * streamutil.c - utility functions for pg_basebackup, pg_receivewal and
- * 					pg_recvlogical
+ *					pg_recvlogical
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/streamutil.c
@@ -17,17 +17,16 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-/* local includes */
-#include "receivelog.h"
-#include "streamutil.h"
-
 #include "access/xlog_internal.h"
 #include "common/fe_memutils.h"
 #include "common/file_perm.h"
+#include "common/logging.h"
 #include "datatype/timestamp.h"
 #include "fe_utils/connect.h"
 #include "port/pg_bswap.h"
 #include "pqexpbuffer.h"
+#include "receivelog.h"
+#include "streamutil.h"
 
 #define ERRCODE_DUPLICATE_OBJECT  "42710"
 
@@ -90,7 +89,7 @@ GetConnection(void)
 		conn_opts = PQconninfoParse(connection_string, &err_msg);
 		if (conn_opts == NULL)
 		{
-			fprintf(stderr, "%s: %s", progname, err_msg);
+			pg_log_error("%s", err_msg);
 			exit(1);
 		}
 
@@ -183,8 +182,7 @@ GetConnection(void)
 		 */
 		if (!tmpconn)
 		{
-			fprintf(stderr, _("%s: could not connect to server\n"),
-					progname);
+			pg_log_error("could not connect to server");
 			exit(1);
 		}
 
@@ -201,8 +199,8 @@ GetConnection(void)
 
 	if (PQstatus(tmpconn) != CONNECTION_OK)
 	{
-		fprintf(stderr, _("%s: could not connect to server: %s"),
-				progname, PQerrorMessage(tmpconn));
+		pg_log_error("could not connect to server: %s",
+					 PQerrorMessage(tmpconn));
 		PQfinish(tmpconn);
 		free(values);
 		free(keywords);
@@ -219,19 +217,19 @@ GetConnection(void)
 
 	/*
 	 * Set always-secure search path, so malicious users can't get control.
-	 * The capacity to run normal SQL queries was added in PostgreSQL
-	 * 10, so the search path cannot be changed (by us or attackers) on
-	 * earlier versions.
+	 * The capacity to run normal SQL queries was added in PostgreSQL 10, so
+	 * the search path cannot be changed (by us or attackers) on earlier
+	 * versions.
 	 */
-	if (dbname != NULL && PQserverVersion(conn) >= 100000)
+	if (dbname != NULL && PQserverVersion(tmpconn) >= 100000)
 	{
 		PGresult   *res;
 
 		res = PQexec(tmpconn, ALWAYS_SECURE_SEARCH_PATH_SQL);
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		{
-			fprintf(stderr, _("%s: could not clear search_path: %s\n"),
-					progname, PQerrorMessage(tmpconn));
+			pg_log_error("could not clear search_path: %s",
+						 PQerrorMessage(tmpconn));
 			PQclear(res);
 			PQfinish(tmpconn);
 			exit(1);
@@ -246,18 +244,14 @@ GetConnection(void)
 	tmpparam = PQparameterStatus(tmpconn, "integer_datetimes");
 	if (!tmpparam)
 	{
-		fprintf(stderr,
-				_("%s: could not determine server setting for integer_datetimes\n"),
-				progname);
+		pg_log_error("could not determine server setting for integer_datetimes");
 		PQfinish(tmpconn);
 		exit(1);
 	}
 
 	if (strcmp(tmpparam, "on") != 0)
 	{
-		fprintf(stderr,
-				_("%s: integer_datetimes compile flag does not match server\n"),
-				progname);
+		pg_log_error("integer_datetimes compile flag does not match server");
 		PQfinish(tmpconn);
 		exit(1);
 	}
@@ -300,17 +294,16 @@ RetrieveWalSegSize(PGconn *conn)
 	res = PQexec(conn, "SHOW wal_segment_size");
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s\n"),
-				progname, "SHOW wal_segment_size", PQerrorMessage(conn));
+		pg_log_error("could not send replication command \"%s\": %s",
+					 "SHOW wal_segment_size", PQerrorMessage(conn));
 
 		PQclear(res);
 		return false;
 	}
 	if (PQntuples(res) != 1 || PQnfields(res) < 1)
 	{
-		fprintf(stderr,
-				_("%s: could not fetch WAL segment size: got %d rows and %d fields, expected %d rows and %d or more fields\n"),
-				progname, PQntuples(res), PQnfields(res), 1, 1);
+		pg_log_error("could not fetch WAL segment size: got %d rows and %d fields, expected %d rows and %d or more fields",
+					 PQntuples(res), PQnfields(res), 1, 1);
 
 		PQclear(res);
 		return false;
@@ -319,10 +312,12 @@ RetrieveWalSegSize(PGconn *conn)
 	/* fetch xlog value and unit from the result */
 	if (sscanf(PQgetvalue(res, 0, 0), "%d%s", &xlog_val, xlog_unit) != 2)
 	{
-		fprintf(stderr, _("%s: WAL segment size could not be parsed\n"),
-				progname);
+		pg_log_error("WAL segment size could not be parsed");
+		PQclear(res);
 		return false;
 	}
+
+	PQclear(res);
 
 	/* set the multiplier based on unit to convert xlog_val to bytes */
 	if (strcmp(xlog_unit, "MB") == 0)
@@ -335,13 +330,13 @@ RetrieveWalSegSize(PGconn *conn)
 
 	if (!IsValidWalSegSize(WalSegSz))
 	{
-		fprintf(stderr,
-				_("%s: WAL segment size must be a power of two between 1MB and 1GB, but the remote server reported a value of %d bytes\n"),
-				progname, WalSegSz);
+		pg_log_error(ngettext("WAL segment size must be a power of two between 1 MB and 1 GB, but the remote server reported a value of %d byte",
+							  "WAL segment size must be a power of two between 1 MB and 1 GB, but the remote server reported a value of %d bytes",
+							  WalSegSz),
+					 WalSegSz);
 		return false;
 	}
 
-	PQclear(res);
 	return true;
 }
 
@@ -372,17 +367,16 @@ RetrieveDataDirCreatePerm(PGconn *conn)
 	res = PQexec(conn, "SHOW data_directory_mode");
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s\n"),
-				progname, "SHOW data_directory_mode", PQerrorMessage(conn));
+		pg_log_error("could not send replication command \"%s\": %s",
+					 "SHOW data_directory_mode", PQerrorMessage(conn));
 
 		PQclear(res);
 		return false;
 	}
 	if (PQntuples(res) != 1 || PQnfields(res) < 1)
 	{
-		fprintf(stderr,
-				_("%s: could not fetch group access flag: got %d rows and %d fields, expected %d rows and %d or more fields\n"),
-				progname, PQntuples(res), PQnfields(res), 1, 1);
+		pg_log_error("could not fetch group access flag: got %d rows and %d fields, expected %d rows and %d or more fields",
+					 PQntuples(res), PQnfields(res), 1, 1);
 
 		PQclear(res);
 		return false;
@@ -390,8 +384,8 @@ RetrieveDataDirCreatePerm(PGconn *conn)
 
 	if (sscanf(PQgetvalue(res, 0, 0), "%o", &data_directory_mode) != 1)
 	{
-		fprintf(stderr, _("%s: group access flag could not be parsed: %s\n"),
-				progname, PQgetvalue(res, 0, 0));
+		pg_log_error("group access flag could not be parsed: %s",
+					 PQgetvalue(res, 0, 0));
 
 		PQclear(res);
 		return false;
@@ -425,17 +419,16 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 	res = PQexec(conn, "IDENTIFY_SYSTEM");
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
-				progname, "IDENTIFY_SYSTEM", PQerrorMessage(conn));
+		pg_log_error("could not send replication command \"%s\": %s",
+					 "IDENTIFY_SYSTEM", PQerrorMessage(conn));
 
 		PQclear(res);
 		return false;
 	}
 	if (PQntuples(res) != 1 || PQnfields(res) < 3)
 	{
-		fprintf(stderr,
-				_("%s: could not identify system: got %d rows and %d fields, expected %d rows and %d or more fields\n"),
-				progname, PQntuples(res), PQnfields(res), 1, 3);
+		pg_log_error("could not identify system: got %d rows and %d fields, expected %d rows and %d or more fields",
+					 PQntuples(res), PQnfields(res), 1, 3);
 
 		PQclear(res);
 		return false;
@@ -454,9 +447,8 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 	{
 		if (sscanf(PQgetvalue(res, 0, 2), "%X/%X", &hi, &lo) != 2)
 		{
-			fprintf(stderr,
-					_("%s: could not parse write-ahead log location \"%s\"\n"),
-					progname, PQgetvalue(res, 0, 2));
+			pg_log_error("could not parse write-ahead log location \"%s\"",
+						 PQgetvalue(res, 0, 2));
 
 			PQclear(res);
 			return false;
@@ -472,9 +464,8 @@ RunIdentifySystem(PGconn *conn, char **sysid, TimeLineID *starttli,
 		{
 			if (PQnfields(res) < 4)
 			{
-				fprintf(stderr,
-						_("%s: could not identify system: got %d rows and %d fields, expected %d rows and %d or more fields\n"),
-						progname, PQntuples(res), PQnfields(res), 1, 4);
+				pg_log_error("could not identify system: got %d rows and %d fields, expected %d rows and %d or more fields",
+							 PQntuples(res), PQnfields(res), 1, 4);
 
 				PQclear(res);
 				return false;
@@ -509,19 +500,19 @@ CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
 	/* Build query */
 	appendPQExpBuffer(query, "CREATE_REPLICATION_SLOT \"%s\"", slot_name);
 	if (is_temporary)
-		appendPQExpBuffer(query, " TEMPORARY");
+		appendPQExpBufferStr(query, " TEMPORARY");
 	if (is_physical)
 	{
-		appendPQExpBuffer(query, " PHYSICAL");
+		appendPQExpBufferStr(query, " PHYSICAL");
 		if (reserve_wal)
-			appendPQExpBuffer(query, " RESERVE_WAL");
+			appendPQExpBufferStr(query, " RESERVE_WAL");
 	}
 	else
 	{
 		appendPQExpBuffer(query, " LOGICAL \"%s\"", plugin);
 		if (PQserverVersion(conn) >= 100000)
 			/* pg_recvlogical doesn't use an exported snapshot, so suppress */
-			appendPQExpBuffer(query, " NOEXPORT_SNAPSHOT");
+			appendPQExpBufferStr(query, " NOEXPORT_SNAPSHOT");
 	}
 
 	res = PQexec(conn, query->data);
@@ -539,8 +530,8 @@ CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
 		}
 		else
 		{
-			fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
-					progname, query->data, PQerrorMessage(conn));
+			pg_log_error("could not send replication command \"%s\": %s",
+						 query->data, PQerrorMessage(conn));
 
 			destroyPQExpBuffer(query);
 			PQclear(res);
@@ -550,10 +541,9 @@ CreateReplicationSlot(PGconn *conn, const char *slot_name, const char *plugin,
 
 	if (PQntuples(res) != 1 || PQnfields(res) != 4)
 	{
-		fprintf(stderr,
-				_("%s: could not create replication slot \"%s\": got %d rows and %d fields, expected %d rows and %d fields\n"),
-				progname, slot_name,
-				PQntuples(res), PQnfields(res), 1, 4);
+		pg_log_error("could not create replication slot \"%s\": got %d rows and %d fields, expected %d rows and %d fields",
+					 slot_name,
+					 PQntuples(res), PQnfields(res), 1, 4);
 
 		destroyPQExpBuffer(query);
 		PQclear(res);
@@ -585,8 +575,8 @@ DropReplicationSlot(PGconn *conn, const char *slot_name)
 	res = PQexec(conn, query->data);
 	if (PQresultStatus(res) != PGRES_COMMAND_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
-				progname, query->data, PQerrorMessage(conn));
+		pg_log_error("could not send replication command \"%s\": %s",
+					 query->data, PQerrorMessage(conn));
 
 		destroyPQExpBuffer(query);
 		PQclear(res);
@@ -595,10 +585,9 @@ DropReplicationSlot(PGconn *conn, const char *slot_name)
 
 	if (PQntuples(res) != 0 || PQnfields(res) != 0)
 	{
-		fprintf(stderr,
-				_("%s: could not drop replication slot \"%s\": got %d rows and %d fields, expected %d rows and %d fields\n"),
-				progname, slot_name,
-				PQntuples(res), PQnfields(res), 0, 0);
+		pg_log_error("could not drop replication slot \"%s\": got %d rows and %d fields, expected %d rows and %d fields",
+					 slot_name,
+					 PQntuples(res), PQnfields(res), 0, 0);
 
 		destroyPQExpBuffer(query);
 		PQclear(res);

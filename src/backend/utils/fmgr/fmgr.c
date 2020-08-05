@@ -3,7 +3,7 @@
  * fmgr.c
  *	  The Postgres function manager.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -15,12 +15,14 @@
 
 #include "postgres.h"
 
-#include "access/tuptoaster.h"
+#include "access/detoast.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 #include "executor/functions.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "pgstat.h"
 #include "utils/acl.h"
@@ -53,12 +55,13 @@ static HTAB *CFuncHash = NULL;
 
 
 static void fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
-					   bool ignore_security);
+								   bool ignore_security);
 static void fmgr_info_C_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple);
 static void fmgr_info_other_lang(Oid functionId, FmgrInfo *finfo, HeapTuple procedureTuple);
 static CFuncHashTabEntry *lookup_C_func(HeapTuple procedureTuple);
 static void record_C_func(HeapTuple procedureTuple,
-			  PGFunction user_fn, const Pg_finfo_record *inforec);
+						  PGFunction user_fn, const Pg_finfo_record *inforec);
+
 /* extern so it's callable via JIT */
 extern Datum fmgr_security_definer(PG_FUNCTION_ARGS);
 
@@ -74,12 +77,12 @@ fmgr_isbuiltin(Oid id)
 	uint16		index;
 
 	/* fast lookup only possible if original oid still assigned */
-	if (id >= FirstBootstrapObjectId)
+	if (id > fmgr_last_builtin_oid)
 		return NULL;
 
 	/*
 	 * Lookup function data. If there's a miss in that range it's likely a
-	 * nonexistant function, returning NULL here will trigger an ERROR later.
+	 * nonexistent function, returning NULL here will trigger an ERROR later.
 	 */
 	index = fmgr_builtin_oid_index[id];
 	if (index == InvalidOidBuiltinMapping)
@@ -216,7 +219,7 @@ fmgr_info_cxt_security(Oid functionId, FmgrInfo *finfo, MemoryContext mcxt,
 
 			/*
 			 * For an ordinary builtin function, we should never get here
-			 * because the isbuiltin() search above will have succeeded.
+			 * because the fmgr_isbuiltin() search above will have succeeded.
 			 * However, if the user has done a CREATE FUNCTION to create an
 			 * alias for a builtin function, we can end up here.  In that case
 			 * we have to look up the function by name.  The name of the
@@ -297,7 +300,7 @@ fmgr_symbol(Oid functionId, char **mod, char **fn)
 		!heap_attisnull(procedureTuple, Anum_pg_proc_proconfig, NULL) ||
 		FmgrHookIsNeeded(functionId))
 	{
-		*mod = NULL; /* core binary */
+		*mod = NULL;			/* core binary */
 		*fn = pstrdup("fmgr_security_definer");
 		ReleaseSysCache(procedureTuple);
 		return;
@@ -312,7 +315,7 @@ fmgr_symbol(Oid functionId, char **mod, char **fn)
 			if (isnull)
 				elog(ERROR, "null prosrc");
 
-			*mod = NULL; /* core binary */
+			*mod = NULL;		/* core binary */
 			*fn = TextDatumGetCString(prosrcattr);
 			break;
 
@@ -336,13 +339,13 @@ fmgr_symbol(Oid functionId, char **mod, char **fn)
 			break;
 
 		case SQLlanguageId:
-			*mod = NULL;  /* core binary */
+			*mod = NULL;		/* core binary */
 			*fn = pstrdup("fmgr_sql");
 			break;
 
 		default:
 			*mod = NULL;
-			*fn = NULL; /* unknown, pass pointer */
+			*fn = NULL;			/* unknown, pass pointer */
 			break;
 	}
 
@@ -528,7 +531,7 @@ fetch_finfo_record(void *filehandle, const char *funcname)
 static CFuncHashTabEntry *
 lookup_C_func(HeapTuple procedureTuple)
 {
-	Oid			fn_oid = HeapTupleGetOid(procedureTuple);
+	Oid			fn_oid = ((Form_pg_proc) GETSTRUCT(procedureTuple))->oid;
 	CFuncHashTabEntry *entry;
 
 	if (CFuncHash == NULL)
@@ -553,7 +556,7 @@ static void
 record_C_func(HeapTuple procedureTuple,
 			  PGFunction user_fn, const Pg_finfo_record *inforec)
 {
-	Oid			fn_oid = HeapTupleGetOid(procedureTuple);
+	Oid			fn_oid = ((Form_pg_proc) GETSTRUCT(procedureTuple))->oid;
 	CFuncHashTabEntry *entry;
 	bool		found;
 
@@ -791,18 +794,18 @@ fmgr_security_definer(PG_FUNCTION_ARGS)
 Datum
 DirectFunctionCall1Coll(PGFunction func, Oid collation, Datum arg1)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 1);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 1, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 1, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.argnull[0] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -811,20 +814,20 @@ DirectFunctionCall1Coll(PGFunction func, Oid collation, Datum arg1)
 Datum
 DirectFunctionCall2Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 2);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 2, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 2, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -834,22 +837,22 @@ Datum
 DirectFunctionCall3Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg3)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 3);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 3, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 3, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -859,24 +862,24 @@ Datum
 DirectFunctionCall4Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg3, Datum arg4)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 4);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 4, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 4, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -886,26 +889,26 @@ Datum
 DirectFunctionCall5Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg3, Datum arg4, Datum arg5)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 5);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 5, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 5, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -916,28 +919,28 @@ DirectFunctionCall6Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg3, Datum arg4, Datum arg5,
 						Datum arg6)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 6);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 6, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 6, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -948,30 +951,30 @@ DirectFunctionCall7Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg3, Datum arg4, Datum arg5,
 						Datum arg6, Datum arg7)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 7);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 7, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 7, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
+	fcinfo->args[6].value = arg7;
+	fcinfo->args[6].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -982,32 +985,32 @@ DirectFunctionCall8Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg3, Datum arg4, Datum arg5,
 						Datum arg6, Datum arg7, Datum arg8)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 8);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 8, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 8, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.arg[7] = arg8;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-	fcinfo.argnull[7] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
+	fcinfo->args[6].value = arg7;
+	fcinfo->args[6].isnull = false;
+	fcinfo->args[7].value = arg8;
+	fcinfo->args[7].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -1019,34 +1022,34 @@ DirectFunctionCall9Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 						Datum arg6, Datum arg7, Datum arg8,
 						Datum arg9)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 9);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, NULL, 9, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, NULL, 9, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.arg[7] = arg8;
-	fcinfo.arg[8] = arg9;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-	fcinfo.argnull[7] = false;
-	fcinfo.argnull[8] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
+	fcinfo->args[6].value = arg7;
+	fcinfo->args[6].isnull = false;
+	fcinfo->args[7].value = arg8;
+	fcinfo->args[7].isnull = false;
+	fcinfo->args[8].value = arg9;
+	fcinfo->args[8].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -1064,18 +1067,18 @@ DirectFunctionCall9Coll(PGFunction func, Oid collation, Datum arg1, Datum arg2,
 Datum
 CallerFInfoFunctionCall1(PGFunction func, FmgrInfo *flinfo, Oid collation, Datum arg1)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 1);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 1, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 1, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.argnull[0] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -1084,20 +1087,20 @@ CallerFInfoFunctionCall1(PGFunction func, FmgrInfo *flinfo, Oid collation, Datum
 Datum
 CallerFInfoFunctionCall2(PGFunction func, FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 2);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 2, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 2, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
 
-	result = (*func) (&fcinfo);
+	result = (*func) (fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
+	if (fcinfo->isnull)
 		elog(ERROR, "function %p returned NULL", (void *) func);
 
 	return result;
@@ -1109,21 +1112,38 @@ CallerFInfoFunctionCall2(PGFunction func, FmgrInfo *flinfo, Oid collation, Datum
  * are allowed to be NULL.
  */
 Datum
-FunctionCall1Coll(FmgrInfo *flinfo, Oid collation, Datum arg1)
+FunctionCall0Coll(FmgrInfo *flinfo, Oid collation)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 0);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 1, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 0, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.argnull[0] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
+
+	return result;
+}
+
+Datum
+FunctionCall1Coll(FmgrInfo *flinfo, Oid collation, Datum arg1)
+{
+	LOCAL_FCINFO(fcinfo, 1);
+	Datum		result;
+
+	InitFunctionCallInfoData(*fcinfo, flinfo, 1, collation, NULL, NULL);
+
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+
+	result = FunctionCallInvoke(fcinfo);
+
+	/* Check for null result, since caller is clearly not expecting one */
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1131,21 +1151,21 @@ FunctionCall1Coll(FmgrInfo *flinfo, Oid collation, Datum arg1)
 Datum
 FunctionCall2Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 2);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 2, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 2, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1154,23 +1174,23 @@ Datum
 FunctionCall3Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg3)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 3);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 3, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 3, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1179,25 +1199,25 @@ Datum
 FunctionCall4Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg3, Datum arg4)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 4);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 4, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 4, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1206,27 +1226,27 @@ Datum
 FunctionCall5Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg3, Datum arg4, Datum arg5)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 5);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 5, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 5, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1236,29 +1256,29 @@ FunctionCall6Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg3, Datum arg4, Datum arg5,
 				  Datum arg6)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 6);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 6, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 6, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1268,31 +1288,31 @@ FunctionCall7Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg3, Datum arg4, Datum arg5,
 				  Datum arg6, Datum arg7)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 7);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 7, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 7, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
+	fcinfo->args[6].value = arg7;
+	fcinfo->args[6].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1302,33 +1322,33 @@ FunctionCall8Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg3, Datum arg4, Datum arg5,
 				  Datum arg6, Datum arg7, Datum arg8)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 8);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 8, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 8, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.arg[7] = arg8;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-	fcinfo.argnull[7] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
+	fcinfo->args[6].value = arg7;
+	fcinfo->args[6].isnull = false;
+	fcinfo->args[7].value = arg8;
+	fcinfo->args[7].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1339,35 +1359,35 @@ FunctionCall9Coll(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2,
 				  Datum arg6, Datum arg7, Datum arg8,
 				  Datum arg9)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 9);
 	Datum		result;
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 9, collation, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 9, collation, NULL, NULL);
 
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.arg[7] = arg8;
-	fcinfo.arg[8] = arg9;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-	fcinfo.argnull[7] = false;
-	fcinfo.argnull[8] = false;
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = arg2;
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = arg3;
+	fcinfo->args[2].isnull = false;
+	fcinfo->args[3].value = arg4;
+	fcinfo->args[3].isnull = false;
+	fcinfo->args[4].value = arg5;
+	fcinfo->args[4].isnull = false;
+	fcinfo->args[5].value = arg6;
+	fcinfo->args[5].isnull = false;
+	fcinfo->args[6].value = arg7;
+	fcinfo->args[6].isnull = false;
+	fcinfo->args[7].value = arg8;
+	fcinfo->args[7].isnull = false;
+	fcinfo->args[8].value = arg9;
+	fcinfo->args[8].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", fcinfo.flinfo->fn_oid);
+	if (fcinfo->isnull)
+		elog(ERROR, "function %u returned NULL", flinfo->fn_oid);
 
 	return result;
 }
@@ -1384,68 +1404,30 @@ Datum
 OidFunctionCall0Coll(Oid functionId, Oid collation)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 0, collation, NULL, NULL);
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall0Coll(&flinfo, collation);
 }
 
 Datum
 OidFunctionCall1Coll(Oid functionId, Oid collation, Datum arg1)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 1, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.argnull[0] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall1Coll(&flinfo, collation, arg1);
 }
 
 Datum
 OidFunctionCall2Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 2, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall2Coll(&flinfo, collation, arg1, arg2);
 }
 
 Datum
@@ -1453,27 +1435,10 @@ OidFunctionCall3Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg3)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 3, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall3Coll(&flinfo, collation, arg1, arg2, arg3);
 }
 
 Datum
@@ -1481,29 +1446,10 @@ OidFunctionCall4Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg3, Datum arg4)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 4, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall4Coll(&flinfo, collation, arg1, arg2, arg3, arg4);
 }
 
 Datum
@@ -1511,31 +1457,10 @@ OidFunctionCall5Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg3, Datum arg4, Datum arg5)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 5, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall5Coll(&flinfo, collation, arg1, arg2, arg3, arg4, arg5);
 }
 
 Datum
@@ -1544,33 +1469,11 @@ OidFunctionCall6Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg6)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 6, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall6Coll(&flinfo, collation, arg1, arg2, arg3, arg4, arg5,
+							 arg6);
 }
 
 Datum
@@ -1579,35 +1482,11 @@ OidFunctionCall7Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg6, Datum arg7)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 7, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall7Coll(&flinfo, collation, arg1, arg2, arg3, arg4, arg5,
+							 arg6, arg7);
 }
 
 Datum
@@ -1616,37 +1495,11 @@ OidFunctionCall8Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg6, Datum arg7, Datum arg8)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 8, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.arg[7] = arg8;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-	fcinfo.argnull[7] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall8Coll(&flinfo, collation, arg1, arg2, arg3, arg4, arg5,
+							 arg6, arg7, arg8);
 }
 
 Datum
@@ -1656,39 +1509,11 @@ OidFunctionCall9Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 					 Datum arg9)
 {
 	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
 
 	fmgr_info(functionId, &flinfo);
 
-	InitFunctionCallInfoData(fcinfo, &flinfo, 9, collation, NULL, NULL);
-
-	fcinfo.arg[0] = arg1;
-	fcinfo.arg[1] = arg2;
-	fcinfo.arg[2] = arg3;
-	fcinfo.arg[3] = arg4;
-	fcinfo.arg[4] = arg5;
-	fcinfo.arg[5] = arg6;
-	fcinfo.arg[6] = arg7;
-	fcinfo.arg[7] = arg8;
-	fcinfo.arg[8] = arg9;
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
-	fcinfo.argnull[3] = false;
-	fcinfo.argnull[4] = false;
-	fcinfo.argnull[5] = false;
-	fcinfo.argnull[6] = false;
-	fcinfo.argnull[7] = false;
-	fcinfo.argnull[8] = false;
-
-	result = FunctionCallInvoke(&fcinfo);
-
-	/* Check for null result, since caller is clearly not expecting one */
-	if (fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", flinfo.fn_oid);
-
-	return result;
+	return FunctionCall9Coll(&flinfo, collation, arg1, arg2, arg3, arg4, arg5,
+							 arg6, arg7, arg8, arg9);
 }
 
 
@@ -1707,35 +1532,35 @@ OidFunctionCall9Coll(Oid functionId, Oid collation, Datum arg1, Datum arg2,
 Datum
 InputFunctionCall(FmgrInfo *flinfo, char *str, Oid typioparam, int32 typmod)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 3);
 	Datum		result;
 
 	if (str == NULL && flinfo->fn_strict)
 		return (Datum) 0;		/* just return null result */
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
 
-	fcinfo.arg[0] = CStringGetDatum(str);
-	fcinfo.arg[1] = ObjectIdGetDatum(typioparam);
-	fcinfo.arg[2] = Int32GetDatum(typmod);
-	fcinfo.argnull[0] = (str == NULL);
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
+	fcinfo->args[0].value = CStringGetDatum(str);
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = ObjectIdGetDatum(typioparam);
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = Int32GetDatum(typmod);
+	fcinfo->args[2].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Should get null result if and only if str is NULL */
 	if (str == NULL)
 	{
-		if (!fcinfo.isnull)
+		if (!fcinfo->isnull)
 			elog(ERROR, "input function %u returned non-NULL",
-				 fcinfo.flinfo->fn_oid);
+				 flinfo->fn_oid);
 	}
 	else
 	{
-		if (fcinfo.isnull)
+		if (fcinfo->isnull)
 			elog(ERROR, "input function %u returned NULL",
-				 fcinfo.flinfo->fn_oid);
+				 flinfo->fn_oid);
 	}
 
 	return result;
@@ -1766,35 +1591,35 @@ Datum
 ReceiveFunctionCall(FmgrInfo *flinfo, StringInfo buf,
 					Oid typioparam, int32 typmod)
 {
-	FunctionCallInfoData fcinfo;
+	LOCAL_FCINFO(fcinfo, 3);
 	Datum		result;
 
 	if (buf == NULL && flinfo->fn_strict)
 		return (Datum) 0;		/* just return null result */
 
-	InitFunctionCallInfoData(fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
+	InitFunctionCallInfoData(*fcinfo, flinfo, 3, InvalidOid, NULL, NULL);
 
-	fcinfo.arg[0] = PointerGetDatum(buf);
-	fcinfo.arg[1] = ObjectIdGetDatum(typioparam);
-	fcinfo.arg[2] = Int32GetDatum(typmod);
-	fcinfo.argnull[0] = (buf == NULL);
-	fcinfo.argnull[1] = false;
-	fcinfo.argnull[2] = false;
+	fcinfo->args[0].value = PointerGetDatum(buf);
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = ObjectIdGetDatum(typioparam);
+	fcinfo->args[1].isnull = false;
+	fcinfo->args[2].value = Int32GetDatum(typmod);
+	fcinfo->args[2].isnull = false;
 
-	result = FunctionCallInvoke(&fcinfo);
+	result = FunctionCallInvoke(fcinfo);
 
 	/* Should get null result if and only if buf is NULL */
 	if (buf == NULL)
 	{
-		if (!fcinfo.isnull)
+		if (!fcinfo->isnull)
 			elog(ERROR, "receive function %u returned non-NULL",
-				 fcinfo.flinfo->fn_oid);
+				 flinfo->fn_oid);
 	}
 	else
 	{
-		if (fcinfo.isnull)
+		if (fcinfo->isnull)
 			elog(ERROR, "receive function %u returned NULL",
-				 fcinfo.flinfo->fn_oid);
+				 flinfo->fn_oid);
 	}
 
 	return result;
@@ -1860,7 +1685,7 @@ OidSendFunctionCall(Oid functionId, Datum val)
 /*-------------------------------------------------------------------------
  *		Support routines for standard maybe-pass-by-reference datatypes
  *
- * int8, float4, and float8 can be passed by value if Datum is wide enough.
+ * int8 and float8 can be passed by value if Datum is wide enough.
  * (For backwards-compatibility reasons, we allow pass-by-ref to be chosen
  * at compile time even if pass-by-val is possible.)
  *
@@ -1880,21 +1705,6 @@ Int64GetDatum(int64 X)
 	*retval = X;
 	return PointerGetDatum(retval);
 }
-#endif							/* USE_FLOAT8_BYVAL */
-
-#ifndef USE_FLOAT4_BYVAL
-
-Datum
-Float4GetDatum(float4 X)
-{
-	float4	   *retval = (float4 *) palloc(sizeof(float4));
-
-	*retval = X;
-	return PointerGetDatum(retval);
-}
-#endif
-
-#ifndef USE_FLOAT8_BYVAL
 
 Datum
 Float8GetDatum(float8 X)
@@ -1904,7 +1714,7 @@ Float8GetDatum(float8 X)
 	*retval = X;
 	return PointerGetDatum(retval);
 }
-#endif
+#endif							/* USE_FLOAT8_BYVAL */
 
 
 /*-------------------------------------------------------------------------
@@ -1916,7 +1726,7 @@ struct varlena *
 pg_detoast_datum(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
-		return heap_tuple_untoast_attr(datum);
+		return detoast_attr(datum);
 	else
 		return datum;
 }
@@ -1925,7 +1735,7 @@ struct varlena *
 pg_detoast_datum_copy(struct varlena *datum)
 {
 	if (VARATT_IS_EXTENDED(datum))
-		return heap_tuple_untoast_attr(datum);
+		return detoast_attr(datum);
 	else
 	{
 		/* Make a modifiable copy of the varlena object */
@@ -1941,14 +1751,14 @@ struct varlena *
 pg_detoast_datum_slice(struct varlena *datum, int32 first, int32 count)
 {
 	/* Only get the specified portion from the toast rel */
-	return heap_tuple_untoast_attr_slice(datum, first, count);
+	return detoast_attr_slice(datum, first, count);
 }
 
 struct varlena *
 pg_detoast_datum_packed(struct varlena *datum)
 {
 	if (VARATT_IS_COMPRESSED(datum) || VARATT_IS_EXTERNAL(datum))
-		return heap_tuple_untoast_attr(datum);
+		return detoast_attr(datum);
 	else
 		return datum;
 }
@@ -2142,6 +1952,57 @@ get_fn_expr_variadic(FmgrInfo *flinfo)
 		return ((FuncExpr *) expr)->funcvariadic;
 	else
 		return false;
+}
+
+/*
+ * Set options to FmgrInfo of opclass support function.
+ *
+ * Opclass support functions are called outside of expressions.  Thanks to that
+ * we can use fn_expr to store opclass options as bytea constant.
+ */
+void
+set_fn_opclass_options(FmgrInfo *flinfo, bytea *options)
+{
+	flinfo->fn_expr = (Node *) makeConst(BYTEAOID, -1, InvalidOid, -1,
+										 PointerGetDatum(options),
+										 options == NULL, false);
+}
+
+/*
+ * Check if options are defined for opclass support function.
+ */
+bool
+has_fn_opclass_options(FmgrInfo *flinfo)
+{
+	if (flinfo && flinfo->fn_expr && IsA(flinfo->fn_expr, Const))
+	{
+		Const	   *expr = (Const *) flinfo->fn_expr;
+
+		if (expr->consttype == BYTEAOID)
+			return !expr->constisnull;
+	}
+	return false;
+}
+
+/*
+ * Get options for opclass support function.
+ */
+bytea *
+get_fn_opclass_options(FmgrInfo *flinfo)
+{
+	if (flinfo && flinfo->fn_expr && IsA(flinfo->fn_expr, Const))
+	{
+		Const	   *expr = (Const *) flinfo->fn_expr;
+
+		if (expr->consttype == BYTEAOID)
+			return expr->constisnull ? NULL : DatumGetByteaP(expr->constvalue);
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("opclass options info is absent in function call context")));
+
+	return NULL;
 }
 
 /*-------------------------------------------------------------------------
